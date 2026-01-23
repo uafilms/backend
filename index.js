@@ -56,13 +56,20 @@ const checkTurnstile = async (req, res, next) => {
 
     // 1. BYPASS KEYS (працюють тільки коли Turnstile увімкнено)
     const apiKey = req.headers['x-api-key'];
-
     if (apiKey) {
-        const envTokens = process.env.API_TOKENS ? process.env.API_TOKENS.split(',') : [];
-        if (envTokens.includes(apiKey)) {
-            return next();
+        try {
+            if (fs.existsSync(TOKENS_FILE)) {
+                const fileContent = fs.readFileSync(TOKENS_FILE, 'utf8');
+                const validTokens = JSON.parse(fileContent);
+                if (Array.isArray(validTokens) && validTokens.includes(apiKey)) {
+                    return next(); 
+                }
+            }
+        } catch (e) {
+            console.error('Error reading tokens file:', e);
         }
     }
+
     // 2. TURNSTILE TOKEN
     const token = req.headers['cf-turnstile-response'] || req.query.token;
     
