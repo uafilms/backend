@@ -9,6 +9,11 @@
   ],
   "routes": [
     {
+      "src": "/(player-script.js|player-style.css)",
+      "dest": "public/$1",
+      "continue": true
+    },
+    {
       "src": "/api/(.*)",
       "dest": "index.js"
     },
@@ -23,10 +28,6 @@
     {
       "src": "/m3u8/(.*)",
       "dest": "index.js"
-    },
-    {
-      "src": "/(index.html|player-script.js|player-style.css)",
-      "dest": "public/$1"
     },
     {
       "src": "/(.*)",
