@@ -1,0 +1,229 @@
+/* =========================================================
+   MATERIAL YOU (M3) VIDEO.JS PLAYER — FINAL FIXED
+   ========================================================= */
+
+/* ================== COLOR SYSTEM ================== */
+:root {
+  --md-sys-color-primary: rgb(170 199 255);
+  --md-sys-color-on-primary: rgb(10 48 95);
+  --md-sys-color-primary-container: rgb(40 71 119);
+  --md-sys-color-on-primary-container: rgb(214 227 255);
+
+  --md-sys-color-secondary-container: rgb(62 71 89);
+  --md-sys-color-on-secondary-container: rgb(218 226 249);
+
+  --md-sys-color-background: rgb(17 19 24);
+  --md-sys-color-on-background: rgb(226 226 233);
+
+  --md-sys-color-surface: rgb(17 19 24);
+  --md-sys-color-on-surface: rgb(226 226 233);
+
+  --md-sys-color-surface-container: rgb(29 32 36);
+  --md-sys-color-surface-container-high: rgb(40 42 47);
+  
+  --md-sys-color-on-surface-variant: rgb(196 198 208);
+  --md-sys-color-outline: rgb(142 144 153);
+  --md-sys-color-outline-variant: rgba(255,255,255,0.08);
+}
+
+html, body {
+  margin: 0; padding: 0;
+  width: 100%; height: 100%;
+  background: black;
+  font-family: "Roboto", sans-serif;
+  overflow: hidden;
+}
+
+/* === PLAYER CONTAINER === */
+.player-wrapper {
+  position: relative;
+  width: 100%; height: 100%;
+  display: block;
+}
+
+/* === VIDEO.JS BASE === */
+.video-js {
+  width: 100% !important;
+  height: 100% !important;
+  display: block;
+  background: black;
+  font-size: 14px;
+  user-select: none;
+}
+
+/* === BIG PLAY BUTTON === */
+.video-js .vjs-big-play-button {
+  /* Центрування кнопки */
+  position: absolute;
+  left: 50% !important; 
+  top: 50% !important;
+  transform: translate(-50%, -50%);
+  
+  /* Розміри */
+  width: 80px; 
+  height: 80px;
+  border-radius: 50%;
+  border: none;
+  
+  /* Стиль */
+  background: var(--md-sys-color-primary-container);
+  color: var(--md-sys-color-on-primary-container);
+  box-shadow: 0 6px 20px rgba(0,0,0,0.6);
+  
+  /* Flex для центрування вмісту */
+  display: flex !important;
+  align-items: center;
+  justify-content: center;
+  
+  margin: 0 !important;
+  padding: 0 !important;
+  z-index: 5;
+  transition: transform 0.2s ease, background 0.2s;
+}
+
+.video-js .vjs-big-play-button:hover {
+  background: var(--md-sys-color-primary);
+  color: var(--md-sys-color-on-primary);
+  transform: translate(-50%, -50%) scale(1.1);
+}
+
+/* Стилізація іконки */
+.video-js .vjs-big-play-button .vjs-icon-placeholder:before {
+  font-size: 48px;
+  line-height: 1; 
+  width: auto;
+  height: auto;
+  
+  /* === ВИПРАВЛЕННЯ: Зсуваємо іконку трохи вниз === */
+  position: relative;
+  top: 5px; 
+  /* ============================================= */
+  
+  margin: 0;
+  padding: 0;
+}
+
+.video-js.vjs-has-started .vjs-big-play-button { 
+  display: none !important; 
+}
+.video-js.vjs-paused.vjs-has-started .vjs-big-play-button { 
+  display: flex !important; 
+  opacity: 1; 
+}
+
+/* === CONTROL BAR === */
+.video-js .vjs-control-bar {
+  position: absolute;
+  left: 16px; right: 16px; bottom: 16px;
+  width: auto; height: 60px;
+  background: rgba(29, 32, 36, 0.85);
+  backdrop-filter: blur(14px);
+  border-radius: 18px;
+  border: 1px solid var(--md-sys-color-outline-variant);
+  display: flex; align-items: center; padding: 0 12px;
+  z-index: 20;
+  transition: opacity 0.2s;
+}
+.video-js.vjs-user-inactive .vjs-control-bar { opacity: 0; pointer-events: none; }
+.video-js.vjs-user-active .vjs-control-bar, .video-js.vjs-paused .vjs-control-bar { opacity: 1; pointer-events: auto; }
+
+/* Buttons */
+.video-js .vjs-button { width: 42px; height: 100%; border-radius: 12px; color: var(--md-sys-color-on-surface-variant); cursor: pointer; }
+.video-js .vjs-button:hover { background: rgba(255,255,255,0.1); color: white; }
+.video-js .vjs-icon-placeholder:before { font-size: 24px; line-height: 60px; }
+
+/* Volume */
+.video-js .vjs-volume-panel { display: flex; align-items: center; margin-right: 10px; }
+.video-js .vjs-volume-control { width: 0; opacity: 0; transition: 0.2s; overflow: hidden; display: flex; align-items: center; }
+.video-js .vjs-volume-panel:hover .vjs-volume-control { width: 80px; opacity: 1; }
+.video-js .vjs-volume-bar { height: 4px; width: 100%; background: #555; border-radius: 2px; margin: 0 5px; }
+.video-js .vjs-volume-level { background: var(--md-sys-color-primary); height: 100%; border-radius: 2px; }
+
+/* Progress */
+.video-js .vjs-progress-control { flex: 1; display: flex; align-items: center; margin: 0 15px; position: relative; height: 100%; }
+.video-js .vjs-progress-holder { height: 4px; background: rgba(255,255,255,0.2); border-radius: 2px; width: 100%; margin: 0; }
+.video-js .vjs-play-progress { background: var(--md-sys-color-primary); border-radius: 2px; }
+.video-js .vjs-play-progress:before { content: ""; position: absolute; right: -6px; top: -3px; width: 10px; height: 10px; border-radius: 50%; background: var(--md-sys-color-primary); transform: scale(0); transition: 0.1s; }
+.video-js .vjs-progress-control:hover .vjs-play-progress:before { transform: scale(1.5); }
+
+/* Time */
+.video-js .vjs-time-control { display: flex !important; line-height: 60px; font-size: 13px; font-weight: 500; min-width: auto; padding: 0 2px; }
+.video-js .vjs-current-time, .video-js .vjs-duration { display: block !important; }
+.video-js .vjs-remaining-time { display: none !important; }
+
+/* === HEADER === */
+#player-header {
+  position: absolute;
+  top: 0; left: 0; width: 100%;
+  padding: 20px;
+  background: linear-gradient(to bottom, rgba(0,0,0,0.8), transparent);
+  display: flex; justify-content: flex-end;
+  z-index: 30; pointer-events: none;
+  opacity: 0; transition: opacity 0.3s;
+}
+.video-js.vjs-user-active #player-header, .video-js.vjs-paused #player-header { opacity: 1; }
+
+.header-controls {
+  pointer-events: auto;
+  display: flex; flex-direction: row; gap: 10px;
+}
+
+.ep-select {
+  background: #222; color: #eee;
+  border: 1px solid #444; padding: 6px 10px;
+  border-radius: 6px; font-size: 13px; cursor: pointer;
+  max-width: 150px;
+}
+
+/* === SETTINGS MENU === */
+#settings-menu {
+  position: absolute;
+  bottom: 80px; right: 20px;
+  width: 250px; max-height: 70%;
+  background: rgba(30, 30, 30, 0.95);
+  backdrop-filter: blur(10px);
+  border-radius: 12px;
+  display: none; flex-direction: column;
+  z-index: 100;
+  box-shadow: 0 5px 20px rgba(0,0,0,0.5);
+  border: 1px solid rgba(255,255,255,0.1);
+  overflow: hidden;
+}
+#settings-menu.active { display: flex; animation: popUp 0.2s ease-out; }
+@keyframes popUp { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+
+.settings-item {
+  padding: 12px 16px;
+  display: flex; justify-content: space-between; align-items: center;
+  cursor: pointer; border-bottom: 1px solid rgba(255,255,255,0.05);
+}
+.settings-item:hover { background: rgba(255,255,255,0.1); }
+.settings-label { display: flex; align-items: center; gap: 10px; font-size: 14px; font-weight: 500; }
+.settings-value { font-size: 12px; color: var(--md-sys-color-primary); }
+
+.settings-submenu {
+  position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+  background: #1f1f1f;
+  display: none; flex-direction: column;
+  z-index: 101;
+}
+.settings-submenu.active { display: flex; }
+.submenu-header {
+  padding: 10px 15px; background: rgba(255,255,255,0.05);
+  font-weight: bold; cursor: pointer; display: flex; align-items: center; gap: 10px;
+  border-bottom: 1px solid rgba(255,255,255,0.1);
+}
+.submenu-scroll { flex: 1; overflow-y: auto; }
+.submenu-option { padding: 10px 20px; cursor: pointer; font-size: 13px; position: relative; }
+.submenu-option:hover { background: rgba(255,255,255,0.1); }
+.submenu-option.selected { color: var(--md-sys-color-primary); font-weight: bold; background: rgba(var(--md-sys-color-primary), 0.1); }
+.submenu-option.selected:after { content: "✓"; position: absolute; right: 15px; }
+
+/* === FULLSCREEN FIXES === */
+.video-js.vjs-fullscreen, .video-js.vjs-full-window {
+    position: fixed !important; top: 0; left: 0;
+    width: 100% !important; height: 100% !important;
+    z-index: 1 !important;
+    overflow: hidden;
+}
+body.vjs-full-window { overflow: hidden; margin: 0; }
