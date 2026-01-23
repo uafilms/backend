@@ -30,7 +30,7 @@ const tokenCache = new NodeCache({ stdTTL: 7200, checkperiod: 600 });
 app.set('trust proxy', true);
 
 const TURNSTILE_ENABLED = process.env.TURNSTILE_ENABLED === 'true';
-const TURNSTILE_SECRET_KEY = '1x0000000000000000000000000000000AA'; 
+const TURNSTILE_SECRET_KEY = process.env.TURNSTILE_SECRET_KEY;
 const TOKENS_FILE = path.join(__dirname, 'tokens.json'); 
 
 // Middleware CORS
