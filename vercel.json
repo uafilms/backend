@@ -1,5 +1,6 @@
 {
   "version": 2,
+  "name": "uafilms-backend",
   "builds": [
     {
       "src": "index.js",
@@ -8,8 +9,31 @@
   ],
   "routes": [
     {
+      "src": "/api/(.*)",
+      "dest": "index.js"
+    },
+    {
+      "src": "/player/(.*)",
+      "dest": "index.js"
+    },
+    {
+      "src": "/proxy/(.*)",
+      "dest": "index.js"
+    },
+    {
+      "src": "/m3u8/(.*)",
+      "dest": "index.js"
+    },
+    {
+      "src": "/(index.html|player-script.js|player-style.css)",
+      "dest": "public/$1"
+    },
+    {
       "src": "/(.*)",
       "dest": "index.js"
     }
-  ]
+  ],
+  "env": {
+    "NODE_ENV": "production"
+  }
 }
