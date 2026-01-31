@@ -357,7 +357,7 @@ async function getMetadata(id, type) {
 
 // Визначення груп провайдерів
 const uaProvidersList = {
-    ashdi: (m) => ashdi.getLinks(m.kinopoisk_id,m.imdb_id ? m.original_title : m.title,m.year),
+    ashdi: (m) => ashdi.getLinks(m.imdb_id, m.imdb_id ? m.original_title : m.title),
     tortuga: (m) => tortuga.getLinks(m.original_title, m.year),
     hdvb: (m) => hdvb.getLinks(m.title, m.year),
     moonanime: (m, h) => moonanime.getLinks(m.imdb_id, m.title, m.year, h),
