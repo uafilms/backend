@@ -6,7 +6,7 @@
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/uafilms/backend)
 
 > [!WARNING]  
-> проект досі у бета-тесті, тому пишіть всі баги які бачили у [Issues](./issues) або в [Телеграм-чат](https://t.me/uafilms_official)
+> проект досі у бета-тесті, тому пишіть всі баги які бачили у [Issues](https://github.com/uafilms/backend/issues) або в [Телеграм-чат](https://t.me/uafilms_official)
 
 ---
 
