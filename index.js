@@ -10,7 +10,6 @@ const cheerio = require('cheerio');
 // Імпорти провайдерів
 const tmdb = require('./tmdb');
 const ashdi = require('./providers/ashdi');
-const tortuga = require('./providers/tortuga');
 const hdvb = require('./providers/hdvb');
 const moonanime = require('./providers/moonanime');
 const uaflix = require('./providers/uaflix');
@@ -308,12 +307,11 @@ function normalizeResponse(tmdbData, type, token = '') {
         episodesMap.get(e).sources.push(sourceObj);
     };
 
-    if (tmdbData.links) {
+        if (tmdbData.links) {
         Object.keys(tmdbData.links).forEach(provider => {
-            let providerData = tmdbData.links[provider];
+            const providerData = tmdbData.links[provider];
             if (providerData) {
-                if (provider === 'tortuga' && providerData.file && typeof providerData.file === 'string' && providerData.file.startsWith('[')) { try { providerData = JSON.parse(providerData.file); } catch(e) {} }
-                const items = Array.isArray(providerData) ? providerData : (providerData.folder || [providerData]);
+                const items = Array.isArray(providerData) ? providerData : [providerData];
                 traverse(provider, items, { season: null, episode: null, dub: null });
             }
         });
@@ -358,7 +356,6 @@ async function getMetadata(id, type) {
 // Визначення груп провайдерів
 const uaProvidersList = {
     ashdi: (m) => ashdi.getLinks(m.imdb_id, m.imdb_id ? m.original_title : m.title),
-    tortuga: (m) => tortuga.getLinks(m.original_title, m.year),
     hdvb: (m) => hdvb.getLinks(m.title, m.year),
     moonanime: (m, h) => moonanime.getLinks(m.imdb_id, m.title, m.year, h),
     uaflix: (m, h) => uaflix.getLinks(m.imdb_id, m.title, m.original_title, m.year, m.type, h)
