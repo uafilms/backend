@@ -3,7 +3,7 @@ const proxyManager = require('../utils/proxyManager');
 const tmdb = require('../tmdb');
 
 const UATUT_BASE = 'https://uk.uatut.fun';
-const MY_PROXY = 'ashdi.aartzz.pp.ua'; // Твій проксі
+const MY_PROXY = 'ashdi.aartzz.pp.ua';
 
 const BASE_HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
@@ -152,7 +152,8 @@ module.exports = {
 
             // Запит до ashdi через твоє проксі
             const html = (await axios.get(iframe, {
-                headers: { 'User-Agent': BASE_HEADERS['User-Agent'] }
+              ...axiosConfig,
+              headers: { 'User-Agent': BASE_HEADERS['User-Agent'] }
             })).data;
             
             return parsePlayer(html, title);
