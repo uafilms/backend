@@ -13,17 +13,16 @@ const BASE_HEADERS = {
 
 const fix = s => typeof s === 'string' ? s.replace(/0yql3tj/g, "oyql3tj") : s;
 
-// Функція безпечного парсингу JS-об'єктів (якщо JSON.parse не справляється)
+// Функція безпечного парсингу JS-об'єктів
 function safeParse(str) {
     if (!str) return null;
     try {
         return JSON.parse(str);
     } catch (e) {
         try {
-            // Якщо там одинарні лапки або JS-об'єкт -> використовуємо Function
             return new Function('return ' + str)();
         } catch (e2) {
-            console.error("[Ashdi] Parse error:", e.message);
+            // Не спамимо в консоль, бо це очікувана поведінка для звичайних рядків
             return null;
         }
     }
@@ -36,7 +35,6 @@ async function getIframe(imdbId, axiosConfig) {
             headers: { ...axiosConfig.headers, ...BASE_HEADERS }
         };
 
-        // 1. Пошук за IMDB ID
         const searchUrl = `${UATUT_BASE}/watch/search.php?q=${encodeURIComponent(imdbId)}`;
         const searchRes = await axios.get(searchUrl, config);
 
@@ -47,17 +45,24 @@ async function getIframe(imdbId, axiosConfig) {
         const item = searchRes.data[0];
         if (!item || !item.id) return null;
 
-        // 2. Отримання сторінки
         const pageUrl = `${UATUT_BASE}/watch/${item.id}`;
         const pageRes = await axios.get(pageUrl, config);
 
-        // 3. Пошук iframe
-        const match = pageRes.data.match(/<iframe[^>]+src\s*=\s*["']([^"']+)["']/i);
-        if (match && match[1]) {
-            let src = match[1];
+        // ВАЖЛИВО: Шукаємо iframe, який містить ashdi або має конкретний ID плеєра, 
+        // щоб не зачепити рекламу.
+        const matches = [...pageRes.data.matchAll(/<iframe[^>]+src\s*=\s*["']([^"']+)["']/gi)];
+        let src = null;
+
+        for (const m of matches) {
+            if (m[1] && (m[1].includes('ashdi') || m[0].includes('vip-player'))) {
+                src = m[1];
+                break;
+            }
+        }
+
+        if (src) {
             if (src.startsWith('//')) src = 'https:' + src;
 
-            // === ЗАМІНА ДОМЕНУ НА ТВІЙ ПРОКСІ ===
             if (src.includes('ashdi')) {
                 src = src.replace(/ashdi\.[a-z]+/i, MY_PROXY);
             }
@@ -73,37 +78,25 @@ async function getIframe(imdbId, axiosConfig) {
 }
 
 function parsePlayer(html, title) {
-    // 1. Глобальні параметри
     const posterMatch = html.match(/poster\s*:\s*['"]([^'"]+)['"]/);
     const globalPoster = posterMatch ? fix(posterMatch[1]) : null;
 
     const subMatch = html.match(/subtitle\s*:\s*['"]([^'"]+)['"]/);
     const globalSubtitle = subMatch ? subMatch[1] : null;
 
-    // 2. Спроба знайти source теги (HTML5)
-    const sources = [...html.matchAll(/<source[^>]+src=["']([^"']+\.m3u8[^"']*)["'][^>]*>/gi)]
-        .map(m => ({ 
-            file: fix(m[1]), 
-            quality: m[0].match(/label=["']([^"']+)/i)?.[1] || 'Auto',
-            poster: globalPoster,
-            subtitle: globalSubtitle
-        }));
-
-    if (sources.length) {
-        return sources.map(s => ({ 
-            file: s.file, title, quality: s.quality, poster: s.poster, subtitle: s.subtitle 
-        }));
-    }
-
-    // 3. Спроба розпарсити JS конфіг
-    // Цей Regex набагато розумніший: він враховує екрановані лапки (\' або \") і не зупиняється на них
+    // 3. Парсинг JS конфігу
     const rawMatch = html.match(/file\s*:\s*(['"])((?:\\\1|.)*?)\1/);
     const raw = rawMatch ? rawMatch[2] : null;
     
     if (!raw) return null;
 
-    // Парсимо (JSON або JS Object)
-    const parsedData = safeParse(raw);
+    // СПРОБА 1: Парсимо як об'єкт/масив (для серіалів)
+    let parsedData = safeParse(raw);
+
+    // СПРОБА 2: Якщо парсинг не вдався, але це рядок - це пряме посилання (для фільмів)
+    if (!parsedData && typeof raw === 'string') {
+        parsedData = raw;
+    }
 
     // A. Це СЕРІАЛ (масив)
     if (Array.isArray(parsedData)) {
@@ -126,7 +119,6 @@ function parsePlayer(html, title) {
     }
 
     // B. Це ФІЛЬМ (рядок або об'єкт)
-    // Якщо parsedData це просто рядок URL
     if (typeof parsedData === 'string') {
         return [{ 
             file: fix(parsedData), 
@@ -150,7 +142,6 @@ module.exports = {
             const iframe = await getIframe(imdbId, axiosConfig);
             if (!iframe) return null;
 
-            // Запит до ashdi через твоє проксі
             const html = (await axios.get(iframe, {
               ...axiosConfig,
               headers: { 'User-Agent': BASE_HEADERS['User-Agent'] }
@@ -173,10 +164,7 @@ module.exports = {
                 imdbId = extIds?.imdb_id;
             }
 
-            if (!imdbId) {
-                // Тиха відмова, якщо немає ID
-                return null;
-            }
+            if (!imdbId) return null;
 
             const title = info.original_title || info.original_name;
             const links = await module.exports.getLinks(imdbId, title);
