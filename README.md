@@ -35,7 +35,7 @@ cd backend
 ---
 
 ## Джерела
-Ashdi, Tortuga, HDVB (Eneyida), UAFlix, MoonAnime, 🇬🇧UEmbed
+Ashdi, HDVB (Eneyida), UAFlix, MoonAnime, 🇬🇧UEmbed
 
 ---
 

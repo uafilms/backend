@@ -39,7 +39,7 @@ cd backend
 ---
 
 ## Sources
-Ashdi, Tortuga, HDVB (Eneyida), UAFlix, MoonAnime, 🇬🇧UEmbed
+Ashdi, HDVB (Eneyida), UAFlix, MoonAnime, 🇬🇧UEmbed
 
 ---
 
