@@ -9,9 +9,11 @@ const BASE_HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
 };
 
-const fix = s => typeof s === 'string' ? s.replace(/0yql3tj/g, 'oyql3tj') : s;
+const fix = s => typeof s === 'string'
+    ? s.replace(/0yql3tj/g, 'oyql3tj')
+    : s;
 
-// Функція безпечного парсингу JS-об'єктів
+// ===== safeParse — НЕ МІНЯЄМО =====
 function safeParse(str) {
     if (!str) return null;
     try {
@@ -26,8 +28,8 @@ function safeParse(str) {
 }
 
 /**
- * 🆕 НОВИЙ getIframe
- * imdb_id → wormhole → ashdi iframe URL
+ * ✅ getIframe
+ * imdb_id → wormhole → ashdi iframe
  */
 async function getIframe(imdbId, axiosConfig) {
     try {
@@ -44,24 +46,29 @@ async function getIframe(imdbId, axiosConfig) {
             src = 'https:' + src;
         }
 
-        // залишаємо твій проксі
         if (src.includes('ashdi.')) {
             src = src.replace(/ashdi\.[a-z]+/i, MY_PROXY);
+        }
+
+        // 🔑 multivoice для фільмів
+        if (/\/vod\/\d+/i.test(src) && !src.includes('multivoice')) {
+            src += (src.includes('?') ? '&' : '?') + 'multivoice';
         }
 
         return src;
 
     } catch (e) {
-        console.error(`[Ashdi] Error in getIframe (wormhole): ${e.message}`);
+        console.error('[Ashdi] getIframe error:', e.message);
         return null;
     }
 }
 
 /**
- * ⛔ НЕ ЧІПАЛИ
- * Парсер JS-плеєра Ashdi → .m3u8
+ * ❗ parsePlayer
+ * ПОВЕРТАЄ СТАРИЙ ФОРМАТ + name
+ * щоб normalizeResponse() коректно діставав dub
  */
-function parsePlayer(html, title) {
+function parsePlayer(html, fallbackTitle) {
     const posterMatch = html.match(/poster\s*:\s*['"]([^'"]+)['"]/);
     const globalPoster = posterMatch ? fix(posterMatch[1]) : null;
 
@@ -73,37 +80,31 @@ function parsePlayer(html, title) {
     if (!raw) return null;
 
     let parsedData = safeParse(raw);
-
     if (!parsedData && typeof raw === 'string') {
         parsedData = raw;
     }
 
-    // Серіал
+    // 🎬 multivoice (ARRAY)
     if (Array.isArray(parsedData)) {
-        const walk = items => items.map(i => {
-            const item = {
-                title: i.title ? i.title.trim() : undefined,
+        return parsedData.map(i => {
+            const voiceTitle = (i.title || fallbackTitle || '').trim();
+            return {
+                title: voiceTitle,          // лишаємо для сумісності
+                name: voiceTitle,           // 🔑 САМЕ ЦЕ ЧИТАЄ normalizeResponse
+                file: fix(i.file),
+                poster: fix(i.poster) || globalPoster,
+                subtitle: i.subtitle || globalSubtitle
             };
-
-            if (i.folder) {
-                item.folder = walk(i.folder);
-            } else {
-                item.file = i.file ? fix(i.file) : undefined;
-                item.poster = i.poster ? fix(i.poster) : globalPoster;
-                item.subtitle = i.subtitle || globalSubtitle;
-            }
-            return item;
         });
-
-        return walk(parsedData);
     }
 
-    // Фільм
+    // 🎬 single stream
     if (typeof parsedData === 'string') {
+        const t = (fallbackTitle || '').trim();
         return [{
+            title: t,
+            name: t,                       // 🔑
             file: fix(parsedData),
-            title,
-            quality: 'Auto',
             poster: globalPoster,
             subtitle: globalSubtitle
         }];
@@ -114,6 +115,10 @@ function parsePlayer(html, title) {
 
 module.exports = {
 
+    /**
+     * 🔑 index.js викликає САМЕ getLinks
+     * формат НЕ міняємо
+     */
     getLinks: async (imdbId, title) => {
         if (!imdbId) return null;
 
@@ -131,63 +136,7 @@ module.exports = {
             return parsePlayer(html, title);
 
         } catch (e) {
-            console.error(`[Ashdi] Error in getLinks: ${e.message}`);
-            return null;
-        }
-    },
-
-    getStream: async (id, type, season, episode) => {
-        try {
-            const info = await tmdb.details(type, id);
-
-            let imdbId = info.imdb_id;
-            if (!imdbId) {
-                const extIds = await tmdb.getExternalIds(id, type === 'tv');
-                imdbId = extIds?.imdb_id;
-            }
-            if (!imdbId) return null;
-
-            const title = info.original_title || info.original_name;
-            const links = await module.exports.getLinks(imdbId, title);
-            if (!links) return null;
-
-            // Фільм
-            if (type === 'movie') {
-                const src = Array.isArray(links) ? links[0] : links;
-                return src?.file
-                    ? { url: src.file, type: 'application/x-mpegURL' }
-                    : null;
-            }
-
-            // Серіал
-            let found = null;
-            const walk = (items, sCtx) => {
-                for (const it of items) {
-                    let s = sCtx, e = null;
-                    const t = it.title || '';
-
-                    const sm = t.match(/(\d+)\s*(?:season|сезон)|(?:season|сезон)\s*(\d+)/i);
-                    if (sm) s = parseInt(sm[1] || sm[2]);
-
-                    const em = t.match(/(\d+)\s*(?:episode|серія)|(?:ep|e)\s*(\d+)/i);
-                    if (em) e = parseInt(em[1] || em[2]);
-
-                    if (it.folder) walk(it.folder, s);
-                    else if (it.file && s == season && e == episode) {
-                        found = it.file;
-                        return;
-                    }
-                }
-            };
-
-            if (Array.isArray(links)) walk(links, null);
-
-            return found
-                ? { url: found, type: 'application/x-mpegURL' }
-                : null;
-
-        } catch (e) {
-            console.error('[Ashdi] getStream error:', e.message);
+            console.error('[Ashdi] getLinks error:', e.message);
             return null;
         }
     }
