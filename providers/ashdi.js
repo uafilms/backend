@@ -69,48 +69,98 @@ async function getIframe(imdbId, axiosConfig) {
  * щоб normalizeResponse() коректно діставав dub
  */
 function parsePlayer(html, fallbackTitle) {
+
     const posterMatch = html.match(/poster\s*:\s*['"]([^'"]+)['"]/);
     const globalPoster = posterMatch ? fix(posterMatch[1]) : null;
 
     const subMatch = html.match(/subtitle\s*:\s*['"]([^'"]+)['"]/);
     const globalSubtitle = subMatch ? subMatch[1] : null;
 
+    /* =====================================================
+       🎬 EXTRACT file:'...'
+    ===================================================== */
+
     const rawMatch = html.match(/file\s*:\s*(['"])((?:\\\1|.)*?)\1/);
-    const raw = rawMatch ? rawMatch[2] : null;
-    if (!raw) return null;
+    if (!rawMatch) return null;
 
-    let parsedData = safeParse(raw);
-    if (!parsedData && typeof raw === 'string') {
-        parsedData = raw;
-    }
+    let raw = rawMatch[2];
+    let parsed = safeParse(raw);
 
-    // 🎬 multivoice (ARRAY)
-    if (Array.isArray(parsedData)) {
-        return parsedData.map(i => {
-            const voiceTitle = (i.title || fallbackTitle || '').trim();
-            return {
-                title: voiceTitle,          // лишаємо для сумісності
-                name: voiceTitle,           // 🔑 САМЕ ЦЕ ЧИТАЄ normalizeResponse
-                file: fix(i.file),
-                poster: fix(i.poster) || globalPoster,
-                subtitle: i.subtitle || globalSubtitle
-            };
-        });
-    }
+    /* =====================================================
+       🎬 SIMPLE FILM / MULTIVOICE
+    ===================================================== */
 
-    // 🎬 single stream
-    if (typeof parsedData === 'string') {
+    if (typeof parsed === 'string') {
         const t = (fallbackTitle || '').trim();
         return [{
             title: t,
-            name: t,                       // 🔑
-            file: fix(parsedData),
+            name: t,
+            file: fix(parsed),
             poster: globalPoster,
             subtitle: globalSubtitle
         }];
     }
 
-    return null;
+    if (Array.isArray(parsed) && parsed[0]?.file) {
+        return parsed.map(i => ({
+            title: (i.title || fallbackTitle || '').trim(),
+            name: (i.title || fallbackTitle || '').trim(),
+            file: fix(i.file),
+            poster: fix(i.poster) || globalPoster,
+            subtitle: i.subtitle || globalSubtitle
+        }));
+    }
+
+    /* =====================================================
+       📺 SERIAL PLAYERJS TREE (🔥 MAIN FIX)
+    ===================================================== */
+
+    const results = [];
+
+    function walk(node, ctx = {}) {
+        if (!node) return;
+
+        // верхній рівень = студія / дубляж
+        if (node.title && !ctx.dub) {
+            ctx = { ...ctx, dub: node.title.trim() };
+        }
+
+        // сезон
+        if (/сезон/i.test(node.title || '')) {
+            const m = node.title.match(/(\d+)/);
+            if (m) ctx = { ...ctx, season: parseInt(m[1]) };
+        }
+
+        // серія
+        if (/серія/i.test(node.title || '')) {
+            const m = node.title.match(/(\d+)/);
+            if (m) ctx = { ...ctx, episode: parseInt(m[1]) };
+        }
+
+        // LEAF
+        if (node.file && typeof node.file === 'string') {
+            results.push({
+                title: node.title?.trim() || fallbackTitle,
+                name: ctx.dub || fallbackTitle,
+                file: fix(node.file),
+                poster: fix(node.poster) || globalPoster,
+                subtitle: node.subtitle || globalSubtitle,
+                season: ctx.season,
+                episode: ctx.episode
+            });
+        }
+
+        // RECURSE
+        if (Array.isArray(node.folder)) {
+            node.folder.forEach(child =>
+                walk(child, { ...ctx })
+            );
+        }
+    }
+
+    parsed.forEach(root => walk(root));
+
+    return results.length ? results : null;
 }
 
 module.exports = {
