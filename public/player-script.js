@@ -111,6 +111,7 @@ document.addEventListener('DOMContentLoaded', function () {
 
     player.playlist(rawPlaylist);
     player.playlist.autoadvance(0);
+    buildSelectors();
 
     /* =====================================================
        SETTINGS MENU ISOLATION (CRITICAL)
@@ -319,3 +320,78 @@ document.addEventListener('DOMContentLoaded', function () {
     }
 
 });
+
+/* =====================================================
+   SEASON / EPISODE SELECTORS (RESTORED)
+===================================================== */
+
+function buildSelectors() {
+    if (!Array.isArray(rawPlaylist) || rawPlaylist.length < 2) return;
+
+    const seasonSelect = document.getElementById('season-select');
+    const episodeSelect = document.getElementById('episode-select');
+    if (!seasonSelect || !episodeSelect) return;
+
+    const seasons = {};
+
+    rawPlaylist.forEach((item, index) => {
+        const s = item.meta?.season ?? 1;
+        const e = item.meta?.episode ?? index + 1;
+        if (!seasons[s]) seasons[s] = [];
+        seasons[s].push({ ep: e, index });
+    });
+
+    seasonSelect.innerHTML = '';
+    episodeSelect.innerHTML = '';
+    seasonSelect.style.display = 'block';
+    episodeSelect.style.display = 'block';
+
+    Object.keys(seasons)
+        .sort((a, b) => a - b)
+        .forEach(s => {
+            const opt = document.createElement('option');
+            opt.value = s;
+            opt.textContent = `Сезон ${s}`;
+            seasonSelect.appendChild(opt);
+        });
+
+    function fillEpisodes(season) {
+        episodeSelect.innerHTML = '';
+        seasons[season]
+            .sort((a, b) => a.ep - b.ep)
+            .forEach(item => {
+                const opt = document.createElement('option');
+                opt.value = item.index;
+                opt.textContent = `Серія ${item.ep}`;
+                episodeSelect.appendChild(opt);
+            });
+    }
+
+    seasonSelect.onchange = () => {
+        fillEpisodes(seasonSelect.value);
+        const first = seasons[seasonSelect.value]?.[0];
+        if (first) player.playlist.currentItem(first.index);
+    };
+
+    episodeSelect.onchange = () => {
+        player.playlist.currentItem(parseInt(episodeSelect.value));
+    };
+
+    // init
+    const firstSeason = Object.keys(seasons).sort((a, b) => a - b)[0];
+    seasonSelect.value = firstSeason;
+    fillEpisodes(firstSeason);
+
+    // sync on playlist change
+    player.on('playlistitem', () => {
+        const idx = player.playlist.currentItem();
+        const meta = rawPlaylist[idx]?.meta;
+        if (!meta) return;
+
+        if (seasonSelect.value != meta.season) {
+            seasonSelect.value = meta.season;
+            fillEpisodes(meta.season);
+        }
+        episodeSelect.value = idx;
+    });
+}
