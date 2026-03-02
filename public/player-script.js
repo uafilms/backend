@@ -42,14 +42,56 @@ document.addEventListener('DOMContentLoaded', function () {
     return String(n) + " bps";
   }
 
+  // ========= QUALITY LABEL FIX (2:1 / non-16:9 ladders) =========
+  function guessStdPFromResolution(w, h) {
+    const W = Number(w) || 0;
+    const H = Number(h) || 0;
+
+    // Якщо ladder 2:1 (3840x1920, 1920x960...) — брати "стандарт" по ширині:
+    // 3840 -> 2160p, 1920 -> 1080p, 1280 -> 720p, 854 -> 480p
+    if (W >= 3800) return 2160;
+    if (W >= 1900) return 1080;
+    if (W >= 1270) return 720;
+    if (W >= 850) return 480;
+    if (W >= 630) return 360;
+    if (W >= 420) return 240;
+
+    // fallback
+    return H > 0 ? H : (W > 0 ? W : -1);
+  }
+
+  function levelResolution(lvl) {
+    // quality-levels / VHS може тримати resolution у playlist.attributes.RESOLUTION
+    const a = lvl && lvl.playlist && lvl.playlist.attributes ? lvl.playlist.attributes : null;
+
+    const rw = (a && a.RESOLUTION && a.RESOLUTION.width) ? a.RESOLUTION.width : (lvl && lvl.width ? lvl.width : 0);
+    const rh = (a && a.RESOLUTION && a.RESOLUTION.height) ? a.RESOLUTION.height : (lvl && lvl.height ? lvl.height : 0);
+
+    return { w: Number(rw) || 0, h: Number(rh) || 0 };
+  }
+
+  function levelRank(lvl) {
+    const r = levelResolution(lvl);
+    const p = guessStdPFromResolution(r.w, r.h);
+    const b = Number((lvl && (lvl.bitrate || lvl.bandwidth)) || 0) || 0;
+    return { p: (p > 0 ? p : 0), b: (b > 0 ? b : 0) };
+  }
+
   function getLevelLabel(lvl) {
-    // Порядок пріоритету: height -> widthxheight -> bitrate -> id
-    if (lvl && lvl.height) return lvl.height + "p";
-    if (lvl && lvl.width && lvl.height) return `${lvl.width}x${lvl.height}`;
-    if (lvl && lvl.bitrate) {
-      const fb = formatBitrate(lvl.bitrate);
+    const r = levelResolution(lvl);
+    const p = guessStdPFromResolution(r.w, r.h);
+
+    if (p > 0) return p + "p";
+
+    // якщо не вийшло визначити "стандарт" — покажемо реальну resolution
+    if (r.w && r.h) return `${r.w}x${r.h}`;
+
+    const br = Number((lvl && (lvl.bitrate || lvl.bandwidth)) || 0) || 0;
+    if (br) {
+      const fb = formatBitrate(br);
       if (fb) return fb;
     }
+
     if (lvl && typeof lvl.id !== 'undefined') return "Level " + lvl.id;
     return "Auto";
   }
@@ -554,7 +596,7 @@ document.addEventListener('DOMContentLoaded', function () {
         // - є хоча б один level з height або bitrate або width
         let hasPluginLevels = false;
         for (let i = 0; i < levels.length; i++) {
-          if (levels[i].height || levels[i].bitrate || levels[i].width) {
+          if (levels[i].height || levels[i].bitrate || levels[i].width || levels[i].playlist) {
             hasPluginLevels = true;
             break;
           }
@@ -583,14 +625,12 @@ document.addEventListener('DOMContentLoaded', function () {
           };
           container.appendChild(autoDiv);
 
-          // сортуємо: спочатку за height, якщо нема — за bitrate
+          // ✅ FIX: сортуємо по "стандартній" p (через width), потім по bitrate
           const sorted = levels.slice().sort((a, b) => {
-            const ah = a.height || 0;
-            const bh = b.height || 0;
-            if (ah !== bh) return bh - ah;
-            const ab = a.bitrate || 0;
-            const bb = b.bitrate || 0;
-            return bb - ab;
+            const ar = levelRank(a);
+            const br = levelRank(b);
+            if (ar.p !== br.p) return br.p - ar.p;
+            return br.b - ar.b;
           });
 
           sorted.forEach(lvl => {
