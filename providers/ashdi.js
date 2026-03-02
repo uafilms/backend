@@ -1,19 +1,29 @@
 const axios = require('axios');
+const cheerio = require('cheerio');
 const proxyManager = require('../utils/proxyManager');
-const tmdb = require('../tmdb');
 
+const BASE_URL = 'https://klon.fun';
+const SEARCH_URL = `${BASE_URL}/engine/ajax/controller.php?mod=search`;
+
+// Домен потрібен лише для обходу/навігації по iframe-сторінках.
+// HLS media URLs (m3u8/ts/m4s/mp4...) НЕ переписуємо на нього,
+// інакше браузер починає тягнути сегменти з іншого origin та ловить CORS.
 const MY_PROXY = 'ashdi.aartzz.pp.ua';
-const WORMHOLE_API = 'https://wormhole.lampame.v6.rocks';
 
 const BASE_HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+};
+
+const NAV_HEADERS = {
+    'User-Agent': BASE_HEADERS['User-Agent'],
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+    'Accept-Language': 'uk-UA,uk;q=0.9,en-US;q=0.8,en;q=0.7'
 };
 
 const fix = s => typeof s === 'string'
     ? s.replace(/0yql3tj/g, 'oyql3tj')
     : s;
 
-// ===== safeParse — НЕ МІНЯЄМО =====
 function safeParse(str) {
     if (!str) return null;
     try {
@@ -27,160 +37,375 @@ function safeParse(str) {
     }
 }
 
-/**
- * ✅ getIframe
- * imdb_id → wormhole → ashdi iframe
- */
-async function getIframe(imdbId, axiosConfig) {
+function absoluteUrl(url, base = BASE_URL) {
+    if (!url) return null;
+    if (url.startsWith('//')) return 'https:' + url;
+    if (/^https?:\/\//i.test(url)) return url;
+    return new URL(url, base).href;
+}
+
+function normalizeUrl(url) {
+    if (!url || typeof url !== 'string') return url;
+    let out = fix(url.trim());
+    if (out.startsWith('//')) out = 'https:' + out;
+    return out;
+}
+
+function isMediaUrl(url) {
+    if (!url || typeof url !== 'string') return false;
+
+    const clean = url.split('?')[0].split('#')[0].toLowerCase();
+
+    return (
+        clean.includes('.m3u8') ||
+        clean.includes('.ts') ||
+        clean.includes('.m4s') ||
+        clean.includes('.mp4') ||
+        clean.includes('.webm') ||
+        clean.includes('.mkv') ||
+        clean.includes('.mp3') ||
+        clean.includes('.aac') ||
+        clean.includes('.vtt') ||
+        clean.includes('.srt') ||
+        /\/(hls|playlist|stream|video|segment)(\/|\?|$)/i.test(clean)
+    );
+}
+
+function rewriteAshdiNavigationUrl(url) {
+    const out = normalizeUrl(url);
+    if (!out) return out;
+
+    return out
+        .replace(/https?:\/\/ashdi\.vip/gi, `https://${MY_PROXY}`)
+        .replace(/https?:\/\/ashdi\.[a-z0-9.-]+/gi, `https://${MY_PROXY}`);
+}
+
+function rewriteAshdiMediaUrl(url) {
+    // Для media не чіпаємо origin — віддаємо пряме посилання.
+    return normalizeUrl(url);
+}
+
+function rewriteUrl(url, { media = false } = {}) {
+    return media ? rewriteAshdiMediaUrl(url) : rewriteAshdiNavigationUrl(url);
+}
+
+function normalizeSearchQuery(imdbId, fallbackTitle) {
+    if (imdbId && /^tt\d+$/i.test(imdbId)) return imdbId.trim();
+    return (fallbackTitle || '').trim();
+}
+
+function cleanTitle(s) {
+    return (s || '')
+        .toLowerCase()
+        .replace(/['’`ʼ"]/g, '')
+        .replace(/ё/g, 'е')
+        .replace(/[^a-z0-9а-яіїєґ\s]/gi, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+}
+
+function extractYearFromText(text) {
+    const m = String(text || '').match(/\b(19|20)\d{2}\b/);
+    return m ? parseInt(m[0], 10) : null;
+}
+
+async function fetchUserHash(axiosConfig) {
+    const { data: html } = await axios.get(BASE_URL + '/', {
+        ...axiosConfig,
+        headers: {
+            ...NAV_HEADERS,
+            'Referer': BASE_URL + '/'
+        },
+        timeout: 15000
+    });
+
+    const hash =
+        html.match(/(?:dle_login_hash|user_hash)\s*=\s*'([^']+)'/)?.[1] ||
+        html.match(/name="user_hash"\s+value="([^"]+)"/)?.[1];
+
+    return hash || null;
+}
+
+async function searchTitle(query, axiosConfig) {
+    const userHash = await fetchUserHash(axiosConfig);
+    if (!userHash) return [];
+
+    const form = new URLSearchParams({
+        query,
+        skin: 'klontv',
+        user_hash: userHash
+    });
+
+    const { data: html } = await axios.post(SEARCH_URL, form.toString(), {
+        ...axiosConfig,
+        headers: {
+            ...NAV_HEADERS,
+            'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+            'X-Requested-With': 'XMLHttpRequest',
+            'Origin': BASE_URL,
+            'Referer': BASE_URL + '/'
+        },
+        timeout: 15000
+    });
+
+    const $ = cheerio.load(html);
+    const results = [];
+
+    $('a[href]').each((_, el) => {
+        const href = $(el).attr('href');
+        if (!href) return;
+
+        const title =
+            $(el).find('.searchheading').text().trim() ||
+            $(el).text().trim();
+
+        if (!title) return;
+        if (!/\.html(?:\?|$)/i.test(href)) return;
+        if (/do=search|subaction=search|mode=advanced/i.test(href)) return;
+
+        results.push({
+            title,
+            url: absoluteUrl(href)
+        });
+    });
+
+    const uniq = new Map();
+    for (const item of results) {
+        if (!uniq.has(item.url)) uniq.set(item.url, item);
+    }
+
+    return [...uniq.values()];
+}
+
+function scoreResult(item, fallbackTitle, year, imdbId) {
+    let score = 0;
+
+    const itemTitle = cleanTitle(item.title);
+    const targetTitle = cleanTitle(fallbackTitle);
+    const itemYear = extractYearFromText(item.title) || extractYearFromText(item.url);
+
+    if (imdbId && /^tt\d+$/i.test(imdbId)) score += 100;
+
+    if (targetTitle && itemTitle === targetTitle) score += 80;
+    else if (targetTitle && itemTitle.includes(targetTitle)) score += 45;
+    else if (targetTitle) {
+        const targetWords = targetTitle.split(' ').filter(Boolean);
+        const matched = targetWords.filter(w => itemTitle.includes(w)).length;
+        score += matched * 6;
+    }
+
+    if (year && itemYear && Number(year) === Number(itemYear)) score += 35;
+
+    if (/\/serialy\//i.test(item.url)) score += 3;
+    if (/\/filmy\//i.test(item.url)) score += 3;
+    if (/\/multfilmy\//i.test(item.url)) score += 3;
+
+    return score;
+}
+
+async function findBestPostUrl(imdbId, fallbackTitle, year, axiosConfig) {
+    const query = normalizeSearchQuery(imdbId, fallbackTitle);
+    if (!query) return null;
+
+    const results = await searchTitle(query, axiosConfig);
+    if (!results.length) return null;
+
+    results.sort((a, b) =>
+        scoreResult(b, fallbackTitle, year, imdbId) -
+        scoreResult(a, fallbackTitle, year, imdbId)
+    );
+
+    return results[0]?.url || null;
+}
+
+async function getIframe(postUrl, axiosConfig) {
     try {
-        const res = await axios.get(WORMHOLE_API, {
+        const { data: html } = await axios.get(postUrl, {
             ...axiosConfig,
-            params: { imdb_id: imdbId },
-            timeout: 10000
+            headers: {
+                ...NAV_HEADERS,
+                'Referer': BASE_URL + '/'
+            },
+            timeout: 15000
         });
 
-        let src = res?.data?.play;
+        const $ = cheerio.load(html);
+
+        let src =
+            $('iframe[data-src*="ashdi.vip"]').attr('data-src') ||
+            $('iframe[src*="ashdi.vip"]').attr('src') ||
+            $('iframe[data-src*="ashdi"]').attr('data-src') ||
+            $('iframe[src*="ashdi"]').attr('src') ||
+            $('iframe[data-src]').attr('data-src') ||
+            $('iframe[src]').attr('src');
+
         if (!src) return null;
 
-        if (src.startsWith('//')) {
-            src = 'https:' + src;
-        }
+        src = absoluteUrl(src, postUrl);
+        src = rewriteUrl(src, { media: false });
 
-        if (src.includes('ashdi.')) {
-            src = src.replace(/ashdi\.[a-z]+/i, MY_PROXY);
-        }
-
-        // 🔑 multivoice для фільмів
+        // multivoice для vod
         if (/\/vod\/\d+/i.test(src) && !src.includes('multivoice')) {
             src += (src.includes('?') ? '&' : '?') + 'multivoice';
         }
 
         return src;
-
     } catch (e) {
         console.error('[Ashdi] getIframe error:', e.message);
         return null;
     }
 }
 
-/**
- * ❗ parsePlayer
- * ПОВЕРТАЄ СТАРИЙ ФОРМАТ + name
- * щоб normalizeResponse() коректно діставав dub
- */
 function parsePlayer(html, fallbackTitle) {
+    // Для multivoice у ashdi основна озвучка зазвичай має id, що збігається
+    // з цифрами у player id. Напр.: id="videoplayer232851" => mainVoiceId = "232851".
+    const mainVoiceId = (
+        html.match(/\bid\s*[:=]\s*["']videoplayer(\d+)["']/i)?.[1] ||
+        html.match(/\bid\s*=\s*["']videoplayer(\d+)["']/i)?.[1] ||
+        null
+    );
 
     const posterMatch = html.match(/poster\s*:\s*['"]([^'"]+)['"]/);
-    const globalPoster = posterMatch ? fix(posterMatch[1]) : null;
+    const globalPoster = posterMatch ? rewriteUrl(posterMatch[1], { media: true }) : null;
 
     const subMatch = html.match(/subtitle\s*:\s*['"]([^'"]+)['"]/);
-    const globalSubtitle = subMatch ? subMatch[1] : null;
+    const globalSubtitle = subMatch ? rewriteUrl(subMatch[1], { media: true }) : null;
 
-    /* =====================================================
-       🎬 EXTRACT file:'...'
-    ===================================================== */
+    let rawMatch = html.match(/file\s*:\s*(['"])((?:\\.|(?!\1).)*)\1/s);
 
-    const rawMatch = html.match(/file\s*:\s*(['"])((?:\\\1|.)*?)\1/);
+    if (!rawMatch) {
+        const arrMatch = html.match(/file\s*:\s*(\[[\s\S]*?\])\s*[,}]/);
+        if (arrMatch) rawMatch = [arrMatch[0], null, arrMatch[1]];
+    }
+
+    if (!rawMatch) {
+        const arrMatch2 = html.match(/file\s*:\s*(\[[\s\S]*\])/);
+        if (arrMatch2) rawMatch = [arrMatch2[0], null, arrMatch2[1]];
+    }
+
+    if (!rawMatch) {
+        const objMatch = html.match(/file\s*:\s*(\{[\s\S]*?\})\s*[,}]/);
+        if (objMatch) rawMatch = [objMatch[0], null, objMatch[1]];
+    }
+
     if (!rawMatch) return null;
 
     let raw = rawMatch[2];
-    let parsed = safeParse(raw);
+    if (!raw) return null;
 
-    /* =====================================================
-       🎬 SIMPLE FILM / MULTIVOICE
-    ===================================================== */
+    raw = raw.replace(/\\'/g, "'").replace(/\\"/g, '"');
+    let parsed = safeParse(raw);
 
     if (typeof parsed === 'string') {
         const t = (fallbackTitle || '').trim();
         return [{
             title: t,
             name: t,
-            file: fix(parsed),
+            file: rewriteUrl(parsed, { media: true }),
             poster: globalPoster,
             subtitle: globalSubtitle
         }];
     }
 
     if (Array.isArray(parsed) && parsed[0]?.file) {
-        return parsed.map(i => ({
+        // Якщо це multivoice масив — піднімемо основну озвучку (id == mainVoiceId) нагору.
+        const sorted = mainVoiceId
+            ? [...parsed].sort((a, b) => {
+                const aMain = String(a?.id ?? '') === String(mainVoiceId);
+                const bMain = String(b?.id ?? '') === String(mainVoiceId);
+                if (aMain && !bMain) return -1;
+                if (!aMain && bMain) return 1;
+                return 0;
+            })
+            : parsed;
+
+        return sorted.map(i => ({
             title: (i.title || fallbackTitle || '').trim(),
             name: (i.title || fallbackTitle || '').trim(),
-            file: fix(i.file),
-            poster: fix(i.poster) || globalPoster,
-            subtitle: i.subtitle || globalSubtitle
+            file: rewriteUrl(i.file, { media: true }),
+            poster: rewriteUrl(i.poster, { media: true }) || globalPoster,
+            subtitle: rewriteUrl(i.subtitle, { media: true }) || globalSubtitle,
+            // зберігаємо id озвучки, може бути корисно для фронта/дебага
+            voiceId: i.id != null ? String(i.id) : undefined
         }));
     }
-
-    /* =====================================================
-       📺 SERIAL PLAYERJS TREE (🔥 MAIN FIX)
-    ===================================================== */
 
     const results = [];
 
     function walk(node, ctx = {}) {
         if (!node) return;
 
-        // верхній рівень = студія / дубляж
         if (node.title && !ctx.dub) {
-            ctx = { ...ctx, dub: node.title.trim() };
+            ctx = { ...ctx, dub: String(node.title).trim() };
         }
 
-        // сезон
-        if (/сезон/i.test(node.title || '')) {
-            const m = node.title.match(/(\d+)/);
-            if (m) ctx = { ...ctx, season: parseInt(m[1]) };
+        if (/сезон|season/i.test(node.title || '')) {
+            const m = String(node.title).match(/(\d+)/);
+            if (m) ctx = { ...ctx, season: parseInt(m[1], 10) };
         }
 
-        // серія
-        if (/серія/i.test(node.title || '')) {
-            const m = node.title.match(/(\d+)/);
-            if (m) ctx = { ...ctx, episode: parseInt(m[1]) };
+        if (/серія|серiя|episode|ep\b|e\b/i.test(node.title || '')) {
+            const m = String(node.title).match(/(\d+)/);
+            if (m) ctx = { ...ctx, episode: parseInt(m[1], 10) };
         }
 
-        // LEAF
         if (node.file && typeof node.file === 'string') {
             results.push({
                 title: node.title?.trim() || fallbackTitle,
                 name: ctx.dub || fallbackTitle,
-                file: fix(node.file),
-                poster: fix(node.poster) || globalPoster,
-                subtitle: node.subtitle || globalSubtitle,
+                file: rewriteUrl(node.file, { media: true }),
+                poster: rewriteUrl(node.poster, { media: true }) || globalPoster,
+                subtitle: rewriteUrl(node.subtitle, { media: true }) || globalSubtitle,
+                voiceId: node.id != null ? String(node.id) : undefined,
                 season: ctx.season,
                 episode: ctx.episode
             });
         }
 
-        // RECURSE
         if (Array.isArray(node.folder)) {
-            node.folder.forEach(child =>
-                walk(child, { ...ctx })
-            );
+            node.folder.forEach(child => walk(child, { ...ctx }));
         }
     }
 
-    parsed.forEach(root => walk(root));
+    if (Array.isArray(parsed)) {
+        parsed.forEach(root => walk(root));
+    } else if (parsed && typeof parsed === 'object') {
+        walk(parsed);
+    }
 
-    return results.length ? results : null;
+    if (!results.length) return null;
+
+    // Додатково: якщо зібрали плоский список (в т.ч. з folder) — також піднімемо основну озвучку.
+    if (mainVoiceId) {
+        results.sort((a, b) => {
+            const aMain = String(a?.voiceId ?? '') === String(mainVoiceId);
+            const bMain = String(b?.voiceId ?? '') === String(mainVoiceId);
+            if (aMain && !bMain) return -1;
+            if (!aMain && bMain) return 1;
+            return 0;
+        });
+    }
+
+    return results;
 }
 
 module.exports = {
-
-    /**
-     * 🔑 index.js викликає САМЕ getLinks
-     * формат НЕ міняємо
-     */
-    getLinks: async (imdbId, title) => {
-        if (!imdbId) return null;
-
+    getLinks: async (imdbId, title, year = null) => {
         const axiosConfig = proxyManager.getConfig('ashdi');
 
         try {
-            const iframe = await getIframe(imdbId, axiosConfig);
+            const postUrl = await findBestPostUrl(imdbId, title, year, axiosConfig);
+            if (!postUrl) return null;
+
+            const iframe = await getIframe(postUrl, axiosConfig);
             if (!iframe) return null;
 
             const html = (await axios.get(iframe, {
                 ...axiosConfig,
-                headers: { 'User-Agent': BASE_HEADERS['User-Agent'] }
+                headers: {
+                    'User-Agent': BASE_HEADERS['User-Agent']
+                },
+                timeout: 15000
             })).data;
 
             return parsePlayer(html, title);
