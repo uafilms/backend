@@ -227,16 +227,3 @@ html, body {
     overflow: hidden;
 }
 body.vjs-full-window { overflow: hidden; margin: 0; }
-
-/* === FIX SETTINGS MENU COLORS & CLICKS === */
-#settings-menu,
-#settings-menu * {
-  color: var(--md-sys-color-on-surface);
-  pointer-events: auto !important;
-}
-
-.video-js.vjs-user-inactive #settings-menu {
-  opacity: 1 !important;
-}
-
-#settings-menu { pointer-events: auto !important; }

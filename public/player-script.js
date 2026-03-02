@@ -1,397 +1,882 @@
 document.addEventListener('DOMContentLoaded', function () {
 
-    /* =====================================================
-       INIT & GUARDS
-    ===================================================== */
+  const urlParams = new URLSearchParams(window.location.search);
+  const contentId = urlParams.get('id');
+  const contentType = urlParams.get('type');
+  const STORAGE_KEY = `uafilms_progress_${contentType}_${contentId}`;
 
-    const params = new URLSearchParams(location.search);
-    const STORAGE_KEY = `uafilms_progress_${params.get('type')}_${params.get('id')}`;
+  let currentDub = "Original";
+  let currentProvider = "Unknown";
+  let isRestoring = false;
 
-    if (!window.videojs || !Array.isArray(window.rawPlaylist)) return;
+  // NEW: щоб UI не “відкочувався” назад на старе значення до loadedmetadata
+  let isSwitching = false;
 
-    let player;
-    let currentDub = null;
-    let currentProvider = null;
-    let isRestoring = false;
-
-    /* =====================================================
-       HELPERS (NO currentSrc FOR UI!)
-    ===================================================== */
-
-    function getMeta() {
-        const idx = player.playlist.currentItem();
-        return rawPlaylist?.[idx]?.meta || null;
-    }
-
-    function getSourceByState(meta) {
-        if (!meta) return null;
-        return (
-            meta.allSources.find(s =>
-                s.dub === currentDub && s.provider === currentProvider
-            ) || meta.allSources[0]
-        );
-    }
-
-    /* =====================================================
-       RESTORE FROM STORAGE
-    ===================================================== */
-
+  // ========= URL / SOURCE HELPERS =========
+  function normUrl(u) {
+    if (!u) return '';
     try {
-        const saved = localStorage.getItem(STORAGE_KEY);
-        if (saved) {
-            const state = JSON.parse(saved);
-
-            const idx = rawPlaylist.findIndex(i =>
-                i.meta?.season === state.season &&
-                i.meta?.episode === state.episode
-            );
-
-            if (idx !== -1) {
-                const src = rawPlaylist[idx].meta.allSources.find(s =>
-                    s.dub === state.dub && s.provider === state.provider
-                );
-
-                if (src) {
-                    rawPlaylist[idx].sources = [{ src: src.url, type: src.type }];
-                    rawPlaylist[idx].poster = src.poster || rawPlaylist[idx].poster;
-                    currentDub = src.dub;
-                    currentProvider = src.provider;
-                }
-            }
-        }
+      const url = new URL(u, window.location.href);
+      url.hash = '';
+      return url.toString();
     } catch (e) {
-        console.warn('[player] restore failed:', e);
+      return String(u).split('#')[0];
     }
+  }
 
-    /* =====================================================
-       VIDEO.JS INIT
-    ===================================================== */
+  function sameUrl(a, b) {
+    return normUrl(a) === normUrl(b);
+  }
 
+  function parseQualityNumber(q) {
+    const m = String(q || '').match(/(\d{3,4})/);
+    return m ? parseInt(m[1], 10) : -1;
+  }
+
+  function formatBitrate(bps) {
+    const n = Number(bps);
+    if (!isFinite(n) || n <= 0) return null;
+    // quality-levels часто дає bitrate в bps
+    if (n >= 1000000) return Math.round(n / 1000000) + " Mbps";
+    if (n >= 1000) return Math.round(n / 1000) + " Kbps";
+    return String(n) + " bps";
+  }
+
+  function getLevelLabel(lvl) {
+    // Порядок пріоритету: height -> widthxheight -> bitrate -> id
+    if (lvl && lvl.height) return lvl.height + "p";
+    if (lvl && lvl.width && lvl.height) return `${lvl.width}x${lvl.height}`;
+    if (lvl && lvl.bitrate) {
+      const fb = formatBitrate(lvl.bitrate);
+      if (fb) return fb;
+    }
+    if (lvl && typeof lvl.id !== 'undefined') return "Level " + lvl.id;
+    return "Auto";
+  }
+
+  function findActiveManualSource(meta, player) {
+    if (!meta || !meta.allSources || !meta.allSources.length) return null;
+    const cur = player && player.currentSrc ? player.currentSrc() : '';
+    if (!cur) return null;
+
+    // 1) strict match
+    let hit = meta.allSources.find(s => sameUrl(s.url, cur));
+    if (hit) return hit;
+
+    // 2) match without query (tokenized/redirected cases)
+    try {
+      const cu = new URL(cur, window.location.href);
+      cu.search = '';
+      const curNoQ = cu.toString();
+
+      hit = meta.allSources.find(s => {
+        try {
+          const su = new URL(s.url, window.location.href);
+          su.search = '';
+          return su.toString() === curNoQ;
+        } catch (e) {
+          return false;
+        }
+      });
+      if (hit) return hit;
+    } catch (e) { }
+
+    return null;
+  }
+
+  // ===== safeParse — НЕ МІНЯЄМО =====
+  function safeParse(str) {
+    if (!str) return null;
+    try {
+      return JSON.parse(str);
+    } catch (e) {
+      try {
+        return new Function('return ' + str)();
+      } catch (e2) {
+        return null;
+      }
+    }
+  }
+
+  // === PRE-PROCESS PLAYLIST ===
+  if (typeof rawPlaylist !== 'undefined' && Array.isArray(rawPlaylist)) {
+    try {
+      const savedJson = localStorage.getItem(STORAGE_KEY);
+      if (savedJson) {
+        const state = JSON.parse(savedJson);
+        const savedIdx = rawPlaylist.findIndex(item =>
+          item.meta.season === state.season && item.meta.episode === state.episode
+        );
+
+        if (savedIdx !== -1) {
+          const freshSource = rawPlaylist[savedIdx].meta.allSources.find(s =>
+            s.dub === state.dub && s.provider === state.provider
+          );
+
+          if (freshSource) {
+            rawPlaylist[savedIdx].sources = [{ src: freshSource.url, type: freshSource.type }];
+            if (freshSource.poster) rawPlaylist[savedIdx].poster = freshSource.poster;
+
+            currentDub = state.dub;
+            currentProvider = state.provider;
+          }
+        }
+      } else {
+        if (rawPlaylist.length > 0 && rawPlaylist[0].meta && rawPlaylist[0].meta.allSources?.length > 0) {
+          const firstSource = rawPlaylist[0].meta.allSources[0];
+          currentDub = firstSource.dub || "Original";
+          currentProvider = firstSource.provider;
+        }
+      }
+    } catch (e) {
+      console.error("Pre-load error:", e);
+    }
+  }
+
+  if (typeof videojs !== 'undefined') {
     const Button = videojs.getComponent('Button');
 
     class SettingsButton extends Button {
-        createEl() {
-            const el = super.createEl('button', {
-                className: 'vjs-control vjs-button vjs-settings-btn',
-                type: 'button'
-            });
-            el.innerHTML = '<span class="material-icons">settings</span>';
-            return el;
+      constructor(player, options) {
+        super(player, options);
+        this.addClass('vjs-settings-btn');
+        this.controlText('Налаштування');
+      }
+      createEl() {
+        const el = super.createEl('button', {
+          className: 'vjs-control vjs-button vjs-settings-btn',
+          type: 'button',
+        });
+        const icon = videojs.dom.createEl('span', {
+          className: 'material-icons icon-placeholder',
+          innerHTML: 'settings',
+          style: 'pointer-events: none;'
+        });
+        if (el.firstChild) el.insertBefore(icon, el.firstChild);
+        else el.appendChild(icon);
+        return el;
+      }
+      handleClick(event) {
+        const menu = document.getElementById('settings-menu');
+        if (menu) {
+          event.stopPropagation();
+          if (menu.style.display === 'flex') {
+            menu.classList.remove('active');
+            menu.style.display = 'none';
+          } else {
+            menu.style.display = 'flex';
+            requestAnimationFrame(() => menu.classList.add('active'));
+            document.querySelectorAll('.settings-submenu').forEach(el => el.classList.remove('active'));
+          }
         }
-        handleClick(e) {
-            e.preventDefault();
-            e.stopPropagation();
-            toggleMenu();
-        }
+      }
     }
-
     videojs.registerComponent('SettingsButton', SettingsButton);
 
-    player = videojs('my-video', {
+    const videoElement = document.getElementById('my-video');
+    if (videoElement) {
+
+      const player = videojs('my-video', {
+        fluid: false,
         fill: true,
         playbackRates: [0.5, 1, 1.25, 1.5, 2],
+        preferFullWindow: true,
         controlBar: {
-            children: [
-                'playToggle',
-                'volumePanel',
-                'currentTimeDisplay',
-                'timeDivider',
-                'durationDisplay',
-                'progressControl',
-                'SettingsButton',
-                'fullscreenToggle'
-            ]
+          children: [
+            'playToggle', 'volumePanel', 'currentTimeDisplay', 'timeDivider',
+            'durationDisplay', 'progressControl', 'SettingsButton', 'fullscreenToggle'
+          ]
         },
         html5: {
-            nativeVideoTracks: true,
-            nativeAudioTracks: true,
-            vhs: { smoothQualityChange: true }
+          // IMPORTANT FIX for qualityLevels from VHS plugin:
+          // force VHS (non-native) so qualityLevels will populate
+          nativeVideoTracks: false,
+          nativeAudioTracks: false,
+          vhs: {
+            overrideNative: true,
+            enableLowInitialPlaylist: true,
+            smoothQualityChange: true
+          }
         }
-    });
+      });
 
-    player.playlist(rawPlaylist);
-    player.playlist.autoadvance(0);
-    buildSelectors();
+      const playerContainer = player.el();
+      const header = document.getElementById('player-header');
+      const menu = document.getElementById('settings-menu');
 
-    /* =====================================================
-       SETTINGS MENU ISOLATION (CRITICAL)
-    ===================================================== */
+      if (playerContainer) {
+        if (header) playerContainer.appendChild(header);
+        if (menu) playerContainer.appendChild(menu);
+      }
 
-    const menu = document.getElementById('settings-menu');
+      const wrapper = document.querySelector('.player-wrapper');
 
-    if (menu) {
-        menu.style.pointerEvents = 'auto';
-        ['mousedown','mouseup','click','touchstart','touchend']
-            .forEach(ev =>
-                menu.addEventListener(ev, e => {
-                    e.stopPropagation();
-                })
+      player.on('play', () => {
+        if (wrapper) wrapper.classList.remove('paused');
+        if (menu) { menu.classList.remove('active'); menu.style.display = 'none'; }
+      });
+
+      player.on('pause', () => {
+        if (wrapper) wrapper.classList.add('paused');
+        saveProgress();
+      });
+
+      player.on('useractive', () => {
+        if (wrapper) wrapper.classList.add('paused');
+      });
+
+      player.on('userinactive', () => {
+        if (!player.paused() && wrapper) wrapper.classList.remove('paused');
+      });
+
+      player.on('mousedown', (e) => {
+        if (menu && menu.style.display === 'flex') {
+          const target = e.target;
+          const isMenu = target.closest('#settings-menu');
+          const isBtn = target.closest('.vjs-settings-btn');
+          if (!isMenu && !isBtn) {
+            menu.classList.remove('active');
+            menu.style.display = 'none';
+          }
+        }
+      });
+
+      if (typeof rawPlaylist !== 'undefined' && Array.isArray(rawPlaylist) && rawPlaylist.length > 0) {
+        player.playlist(rawPlaylist);
+        player.playlist.autoadvance(0);
+      }
+
+      function bindQualityLevelListeners() {
+        if (!player.qualityLevels) return;
+
+        const ql = player.qualityLevels();
+
+        // щоб не навішувати дублікати
+        if (ql.__uafilms_bound) return;
+        ql.__uafilms_bound = true;
+
+        const refresh = () => updateQualityMenu(player);
+
+        ql.on('addqualitylevel', refresh);
+        ql.on('removequalitylevel', refresh);
+        ql.on('change', refresh);
+
+        // ще раз після метаданих / маніфесту
+        player.on('loadedmetadata', refresh);
+        player.on('loadeddata', refresh);
+
+        // VHS інколи додає рівні трохи пізніше
+        setTimeout(refresh, 200);
+        setTimeout(refresh, 800);
+      }
+
+      player.ready(function () {
+        if (this.hotkeys) this.hotkeys({ volumeStep: 0.1, seekStep: 5 });
+
+        if (this.mobileUi) {
+          this.mobileUi({
+            touchControls: { seekSeconds: 10, tapTimeout: 300, disableOnEnd: false },
+            fullscreen: { enterOnRotate: true, lockOnRotate: true }
+          });
+        }
+
+        bindQualityLevelListeners();
+
+        player.textTracks().on('addtrack', () => updateSubsMenu(player));
+        player.textTracks().on('change', () => updateSubsMenu(player));
+
+        const isSeries = typeof rawPlaylist !== 'undefined' && rawPlaylist.length > 1;
+        if (isSeries) buildSelectors(player);
+        else if (header) header.style.display = 'none';
+
+        restoreProgress();
+
+        setInterval(() => {
+          if (!player.paused() && !isRestoring && player.currentTime() > 5) saveProgress();
+        }, 5000);
+
+        player.on('ratechange', () => {
+          updateSpeedMenu(player);
+          saveProgress();
+        });
+
+        if (wrapper) wrapper.classList.add('paused');
+      });
+
+      player.on('playlistitem', () => {
+        const idx = player.playlist.currentItem();
+        const meta = rawPlaylist[idx]?.meta;
+
+        if (!isRestoring) {
+          if (meta && meta.allSources && meta.allSources.length > 0) {
+            let activeSource = meta.allSources.find(s => s.dub === currentDub && s.provider === currentProvider);
+            if (!activeSource) activeSource = meta.allSources[0];
+
+            if (activeSource) {
+              currentDub = activeSource.dub || 'Original';
+              currentProvider = activeSource.provider;
+              syncTracks(player, activeSource);
+            }
+          }
+        }
+
+        updateAudioMenu(player);
+        updateQualityMenu(player);
+      });
+
+      function syncTracks(player, source) {
+        const tracks = player.textTracks();
+        for (let i = tracks.length - 1; i >= 0; i--) {
+          if (tracks[i].kind === 'subtitles') {
+            player.removeRemoteTextTrack(tracks[i]);
+          }
+        }
+        if (source.subtitles && source.subtitles.length > 0) {
+          source.subtitles.forEach(sub => {
+            player.addRemoteTextTrack({
+              kind: 'subtitles',
+              label: sub.label,
+              src: sub.url,
+              srclang: sub.lang
+            }, false);
+          });
+        }
+        updateSubsMenu(player);
+      }
+
+      function saveProgress() {
+        if (isRestoring || !rawPlaylist || rawPlaylist.length === 0 || player.currentTime() < 1) return;
+        const idx = player.playlist.currentItem();
+        const meta = rawPlaylist[idx].meta;
+        const state = {
+          season: meta.season,
+          episode: meta.episode,
+          time: player.currentTime(),
+          speed: player.playbackRate(),
+          dub: currentDub,
+          provider: currentProvider,
+          timestamp: Date.now()
+        };
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+      }
+
+      function restoreProgress() {
+        try {
+          const savedJson = localStorage.getItem(STORAGE_KEY);
+          if (!savedJson) {
+            const idx = player.playlist.currentItem();
+            if (idx >= 0 && rawPlaylist[idx] && rawPlaylist[idx].meta && rawPlaylist[idx].meta.allSources?.length > 0) {
+              const def = rawPlaylist[idx].meta.allSources[0];
+              currentDub = def.dub || "Original";
+              currentProvider = def.provider;
+            }
+
+            updateSpeedMenu(player);
+            updateAudioMenu(player);
+            updateQualityMenu(player);
+            return;
+          }
+
+          const state = JSON.parse(savedJson);
+          isRestoring = true;
+
+          if (state.speed) player.playbackRate(state.speed);
+          updateSpeedMenu(player);
+
+          currentDub = state.dub || "Original";
+          currentProvider = state.provider || "Unknown";
+
+          let foundIndex = -1;
+          if (state.season && state.episode) {
+            foundIndex = rawPlaylist.findIndex(item =>
+              item.meta.season === state.season && item.meta.episode === state.episode
             );
-    }
+          }
 
-    function toggleMenu() {
-        if (!menu) return;
-        const open = menu.classList.contains('active');
-        menu.classList.toggle('active', !open);
-        menu.style.display = open ? 'none' : 'flex';
-        closeSubmenu();
-    }
+          const applyTime = () => {
+            if (state.time > 0) {
+              if (player.readyState() >= 1) {
+                player.currentTime(state.time);
+                isRestoring = false;
+              } else {
+                player.one('loadedmetadata', () => {
+                  player.currentTime(state.time);
+                  isRestoring = false;
+                });
+              }
+            } else {
+              isRestoring = false;
+            }
+          };
 
-    function closeMenu() {
-        if (!menu) return;
-        menu.classList.remove('active');
-        menu.style.display = 'none';
-        closeSubmenu();
-    }
+          if (foundIndex !== -1 && foundIndex !== player.playlist.currentItem()) {
+            player.playlist.currentItem(foundIndex);
+            player.one('loadedmetadata', applyTime);
+          } else {
+            applyTime();
+          }
 
-    /* =====================================================
-       🌍 GLOBAL UI FUNCTIONS (FIX FOR CONSOLE ERROR)
-    ===================================================== */
+          updateAudioMenu(player);
+          updateQualityMenu(player);
 
-    window.openSubmenu = function (id) {
+        } catch (e) {
+          console.error("Restore error", e);
+          isRestoring = false;
+        }
+      }
+
+      // --- UI HELPERS ---
+      window.openSubmenu = function (id) {
         const el = document.getElementById('submenu-' + id);
         if (el) el.classList.add('active');
-    };
+      };
+      window.closeSubmenu = function () {
+        document.querySelectorAll('.settings-submenu').forEach(el => el.classList.remove('active'));
+      };
 
-    window.closeSubmenu = function () {
-        document.querySelectorAll('.settings-submenu')
-            .forEach(el => el.classList.remove('active'));
-    };
-
-    window.setSpeed = function (rate) {
+      window.setSpeed = function (rate) {
         player.playbackRate(rate);
-        updateSpeedMenu();
+        updateSpeedMenu(player);
         closeSubmenu();
         saveProgress();
-    };
+      };
 
-    /* =====================================================
-       PLAYER EVENTS
-    ===================================================== */
+      function updateSpeedMenu(player) {
+        const rate = player.playbackRate();
+        document.querySelectorAll('#submenu-speed .submenu-option').forEach(el => {
+          el.classList.remove('selected');
+          if (Math.abs(parseFloat(el.getAttribute('data-speed')) - rate) < 0.01) el.classList.add('selected');
+        });
+        const vs = document.getElementById('val-speed');
+        if (vs) vs.innerText = rate === 1 ? 'Звичайна' : rate + 'x';
+      }
 
-    player.on('playlistitem', () => {
-        const meta = getMeta();
-        if (!meta) return;
-
-        // INIT STATE IF EMPTY
-        if (!currentDub || !currentProvider) {
-            currentDub = meta.allSources[0].dub;
-            currentProvider = meta.allSources[0].provider;
-        }
-
-        const src = getSourceByState(meta);
-
-        currentDub = src.dub;
-        currentProvider = src.provider;
-
-        syncSubs(src);
-        updateAudioMenu();
-        updateSpeedMenu();
-    });
-
-    /* =====================================================
-       AUDIO MENU (STATE-BASED, FINAL)
-    ===================================================== */
-
-    function updateAudioMenu() {
+      // ========================= AUDIO MENU (FIX VISUAL LIKE SUBS) =========================
+      function updateAudioMenu(player) {
         const container = document.getElementById('audio-options');
         const label = document.getElementById('val-audio');
-        if (!container || !label) return;
+        if (!container || !label || !player.playlist) return;
 
-        const meta = getMeta();
-        if (!meta || meta.allSources.length === 0) return;
+        const idx = player.playlist.currentItem();
+        const meta = rawPlaylist?.[idx]?.meta;
+        const item = document.querySelector('.settings-item[onclick="openSubmenu(\'audio\')"]');
 
-        label.innerText = currentDub;
+        if (!meta?.allSources?.length) return;
 
-        if (meta.allSources.length === 1) {
-            container.innerHTML = '';
-            return;
+        // CRITICAL FIX:
+        // НЕ синхронізуємо з currentSrc() поки йде перемикання, інакше UI відкотиться на стару озвучку
+        if (!isSwitching) {
+          const active = findActiveManualSource(meta, player);
+          if (active) {
+            currentDub = active.dub || 'Original';
+            currentProvider = active.provider;
+          }
         }
+
+        const uniqueDubs = Array.from(new Set(meta.allSources.map(s => s.dub || 'Original')));
+
+        if (uniqueDubs.length <= 1) {
+          label.innerText = uniqueDubs[0] || 'Original';
+          if (item) item.style.display = 'none';
+          container.innerHTML = '';
+          return;
+        }
+
+        if (item) item.style.display = 'flex';
+
+        // як у субтитрах: лейбл завжди від currentDub
+        label.innerText = currentDub || 'Original';
 
         container.innerHTML = '';
 
-        const dubs = [...new Set(meta.allSources.map(s => s.dub))];
+        uniqueDubs.forEach(dubName => {
+          const div = document.createElement('div');
+          div.className = 'submenu-option';
+          div.innerText = dubName;
 
-        dubs.forEach(dub => {
+          if (dubName === (currentDub || 'Original')) div.classList.add('selected');
+
+          div.onclick = function () {
+            const variants = meta.allSources.filter(s => (s.dub || 'Original') === dubName);
+            if (!variants.length) return;
+
+            // вибираємо Auto якщо є, інакше найбільша цифра якості (1080/720)
+            let target = variants.find(s => String(s.quality).toLowerCase() === 'auto') || null;
+            if (!target) {
+              const scored = variants
+                .map(s => ({ s, score: parseQualityNumber(s.quality) }))
+                .sort((a, b) => b.score - a.score);
+              target = (scored[0] && scored[0].s) || variants[0];
+            }
+            if (!target) return;
+
+            // ОПТИМІСТИЧНО, ЯК СУБТИТРИ: одразу міняємо UI, не чекаючи metadata
+            currentDub = target.dub || 'Original';
+            currentProvider = target.provider;
+
+            label.innerText = currentDub;
+
+            container.querySelectorAll('.submenu-option').forEach(x => x.classList.remove('selected'));
+            div.classList.add('selected');
+
+            // щоб не було “старої якості” під час переключення
+            const qVal = document.getElementById('val-quality');
+            if (qVal) qVal.innerText = 'Auto';
+
+            switchSource(player, target, true);
+
+            closeSubmenu();
+          };
+
+          container.appendChild(div);
+        });
+      }
+
+      // ========================= QUALITY MENU (PLUGIN FIRST) =========================
+      function updateQualityMenu(player) {
+        const container = document.getElementById('quality-options');
+        const val = document.getElementById('val-quality');
+        if (!container || !val || !player.playlist) return;
+
+        container.innerHTML = '';
+
+        // 1) пробуємо отримати рівні з плагіна qualityLevels (VHS)
+        const ql = player.qualityLevels ? player.qualityLevels() : null;
+
+        const levels = [];
+        if (ql && typeof ql.length === 'number') {
+          for (let i = 0; i < ql.length; i++) {
+            if (ql[i]) levels.push(ql[i]);
+          }
+        }
+
+        // Вважаємо, що “реальні” рівні є, якщо:
+        // - є хоча б один level з height або bitrate або width
+        let hasPluginLevels = false;
+        for (let i = 0; i < levels.length; i++) {
+          if (levels[i].height || levels[i].bitrate || levels[i].width) {
+            hasPluginLevels = true;
+            break;
+          }
+        }
+
+        if (hasPluginLevels) {
+          // Auto кнопка
+          const autoDiv = document.createElement('div');
+          autoDiv.className = 'submenu-option';
+          autoDiv.innerText = 'Auto';
+
+          // Auto = більше одного enabled або всі enabled
+          let enabledCount = 0;
+          for (let i = 0; i < levels.length; i++) if (levels[i].enabled) enabledCount++;
+          const isAuto = enabledCount !== 1; // якщо не рівно 1 — вважаємо auto
+          if (isAuto) {
+            autoDiv.classList.add('selected');
+            val.innerText = 'Auto';
+          }
+
+          autoDiv.onclick = function () {
+            for (let i = 0; i < levels.length; i++) levels[i].enabled = true;
+            val.innerText = 'Auto';
+            closeSubmenu();
+            highlightQuality(autoDiv);
+          };
+          container.appendChild(autoDiv);
+
+          // сортуємо: спочатку за height, якщо нема — за bitrate
+          const sorted = levels.slice().sort((a, b) => {
+            const ah = a.height || 0;
+            const bh = b.height || 0;
+            if (ah !== bh) return bh - ah;
+            const ab = a.bitrate || 0;
+            const bb = b.bitrate || 0;
+            return bb - ab;
+          });
+
+          sorted.forEach(lvl => {
             const div = document.createElement('div');
             div.className = 'submenu-option';
-            div.textContent = dub;
+            div.innerText = getLevelLabel(lvl);
 
-            if (dub === currentDub) {
-                div.classList.add('selected');
+            // selected = лише цей enabled
+            let selected = true;
+            for (let i = 0; i < levels.length; i++) {
+              const l = levels[i];
+              if (l === lvl) selected = selected && l.enabled;
+              else selected = selected && !l.enabled;
             }
 
-            div.onclick = () => {
-                const src = meta.allSources.find(s =>
-                s.dub === dub && s.provider === currentProvider
-                ) || meta.allSources.find(s => s.dub === dub);
-                if (src) switchSource(src);
+            if (selected) {
+              div.classList.add('selected');
+              val.innerText = getLevelLabel(lvl);
+            }
+
+            div.onclick = function () {
+              for (let i = 0; i < levels.length; i++) levels[i].enabled = false;
+              lvl.enabled = true;
+              val.innerText = getLevelLabel(lvl);
+              closeSubmenu();
+              highlightQuality(div);
             };
 
             container.appendChild(div);
-        });
-    }
+          });
 
-    /* =====================================================
-       SPEED MENU
-    ===================================================== */
+          // якщо нічого не підсвітилось — показуємо Auto
+          if (!container.querySelector('.submenu-option.selected')) {
+            autoDiv.classList.add('selected');
+            val.innerText = 'Auto';
+          }
 
-    function updateSpeedMenu() {
-        const rate = player.playbackRate();
-        const label = document.getElementById('val-speed');
-        if (label) label.innerText = rate === 1 ? 'Звичайна' : rate + 'x';
+          return;
+        }
 
-        document.querySelectorAll('#submenu-speed .submenu-option')
-            .forEach(el => {
-                el.classList.remove('selected');
-                if (parseFloat(el.dataset.speed) === rate) {
-                    el.classList.add('selected');
-                }
+        // 2) fallback на manual qualities (якщо HLS рівні не прийшли)
+        const idx = player.playlist.currentItem();
+        const meta = rawPlaylist?.[idx]?.meta;
+
+        if (meta?.allSources?.length) {
+          // НЕ sync з currentSrc під час перемикання (щоб не скакало)
+          if (!isSwitching) {
+            const active = findActiveManualSource(meta, player);
+            if (active) {
+              currentDub = active.dub || 'Original';
+              currentProvider = active.provider;
+            }
+          }
+
+          const dubName = currentDub || 'Original';
+          const manual = meta.allSources.filter(s => (s.dub || 'Original') === dubName);
+
+          const uniqueByUrl = [];
+          manual.forEach(s => {
+            if (!uniqueByUrl.some(x => sameUrl(x.url, s.url))) uniqueByUrl.push(s);
+          });
+
+          if (uniqueByUrl.length > 1) {
+            const curManual = findActiveManualSource(meta, player);
+
+            const sortedManual = uniqueByUrl
+              .map(s => ({ s, n: parseQualityNumber(s.quality) }))
+              .sort((a, b) => b.n - a.n)
+              .map(x => x.s);
+
+            sortedManual.forEach(src => {
+              const div = document.createElement('div');
+              div.className = 'submenu-option';
+              div.innerText = src.quality || 'Unknown';
+
+              if (curManual && sameUrl(curManual.url, src.url)) {
+                div.classList.add('selected');
+                val.innerText = src.quality || 'Unknown';
+              }
+
+              div.onclick = function () {
+                switchSource(player, src, true);
+                closeSubmenu();
+              };
+
+              container.appendChild(div);
             });
-    }
 
-    /* =====================================================
-       SWITCH SOURCE (ORDER MATTERS)
-    ===================================================== */
+            if (!container.querySelector('.submenu-option.selected')) {
+              val.innerText = 'Auto';
+            }
+            return;
+          }
+        }
 
-    function switchSource(source) {
+        // 3) нічого нема
+        container.innerHTML = '<div style="padding:15px;text-align:center;color:#777;">Auto</div>';
+        val.innerText = 'Auto';
+      }
+
+      function highlightQuality(target) {
+        const q = document.getElementById('quality-options');
+        if (!q) return;
+        const opts = q.children;
+        for (let i = 0; i < opts.length; i++) opts[i].classList.remove('selected');
+        target.classList.add('selected');
+      }
+
+      // ========================= SWITCH SOURCE (FIX AUDIO UI LAG) =========================
+      function switchSource(player, source, restoreTime) {
         const time = player.currentTime();
-        const paused = player.paused();
+        const wasPaused = player.paused();
 
-        // 🔑 UI STATE FIRST
-        currentDub = source.dub;
+        // IMPORTANT: mark switching (prevents updateAudioMenu from syncing to old currentSrc)
+        isSwitching = true;
+
+        currentDub = source.dub || 'Original';
         currentProvider = source.provider;
+
+        // UI як у субтитрах: міняємо одразу
+        updateAudioMenu(player);
+        updateQualityMenu(player);
 
         player.src({ src: source.url, type: source.type });
         if (source.poster) player.poster(source.poster);
 
-        syncSubs(source);
+        syncTracks(player, source);
 
-        updateAudioMenu();
-        updateSpeedMenu();
-        closeSubmenu();
+        const finalize = () => {
+          if (restoreTime) {
+            try { player.currentTime(time); } catch (e) { }
+          }
+          if (!wasPaused) player.play();
 
-        player.one('loadedmetadata', () => {
-            player.currentTime(time);
-            if (!paused) player.play();
-            updateAudioMenu();
-            saveProgress();
+          // switching finished
+          isSwitching = false;
+
+          updateAudioMenu(player);
+          updateSpeedMenu(player);
+          updateQualityMenu(player);
+          saveProgress();
+        };
+
+        // loadedmetadata — основне
+        player.one('loadedmetadata', finalize);
+
+        // fallback якщо metadata дивно відпрацьовує
+        player.one('loadeddata', () => {
+          // якщо finalize вже був — це просто рефреш меню
+          if (isSwitching) {
+            isSwitching = false;
+            updateAudioMenu(player);
+            updateQualityMenu(player);
+          }
         });
-    }
+      }
 
-    /* =====================================================
-       SUBTITLES
-    ===================================================== */
-
-    function syncSubs(source) {
+      // ========================= SUBS MENU (AS-IS) =========================
+      function updateSubsMenu(player) {
         const tracks = player.textTracks();
-        for (let i = tracks.length - 1; i >= 0; i--) {
-            if (tracks[i].kind === 'subtitles') {
-                player.removeRemoteTextTrack(tracks[i]);
-            }
+        const container = document.getElementById('subs-options');
+        if (!container) return;
+        container.innerHTML = '';
+
+        const offDiv = document.createElement('div');
+        offDiv.className = 'submenu-option selected';
+        offDiv.innerText = 'Вимкнено';
+
+        let anyShowing = false;
+        for (let i = 0; i < tracks.length; i++) if (tracks[i].mode === 'showing') anyShowing = true;
+        if (anyShowing) offDiv.classList.remove('selected');
+
+        offDiv.onclick = function () {
+          for (let i = 0; i < tracks.length; i++) tracks[i].mode = 'disabled';
+          const vs = document.getElementById('val-subs');
+          if (vs) vs.innerText = 'Вимк';
+          closeSubmenu();
+          highlightSubs(this);
+        };
+        container.appendChild(offDiv);
+
+        let added = 0;
+        for (let i = 0; i < tracks.length; i++) {
+          let tr = tracks[i];
+          if (tr.kind !== 'subtitles' && tr.kind !== 'captions') continue;
+
+          let div = document.createElement('div');
+          div.className = 'submenu-option';
+          div.innerText = tr.label || tr.language || `Track ${i}`;
+
+          if (tr.mode === 'showing') {
+            div.classList.add('selected');
+            const vs = document.getElementById('val-subs');
+            if (vs) vs.innerText = tr.label || tr.language;
+          }
+
+          div.onclick = function () {
+            for (let j = 0; j < tracks.length; j++) tracks[j].mode = 'disabled';
+            tr.mode = 'showing';
+            const vs = document.getElementById('val-subs');
+            if (vs) vs.innerText = tr.label || tr.language;
+            closeSubmenu();
+            highlightSubs(this);
+          };
+
+          container.appendChild(div);
+          added++;
         }
 
-        source?.subtitles?.forEach(sub => {
-            player.addRemoteTextTrack({
-                kind: 'subtitles',
-                label: sub.label,
-                src: sub.url,
-                srclang: sub.lang
-            }, false);
+        if (added === 0) container.innerHTML = '<div style="padding:15px;text-align:center;color:#777;">Немає субтитрів</div>';
+      }
+
+      function highlightSubs(target) {
+        const container = document.getElementById('subs-options');
+        if (!container) return;
+        const opts = container.children;
+        for (let i = 0; i < opts.length; i++) opts[i].classList.remove('selected');
+        target.classList.add('selected');
+      }
+
+      // ========================= SELECTORS =========================
+      function buildSelectors(player) {
+        if (typeof rawPlaylist === 'undefined') return;
+        const seasons = {};
+        rawPlaylist.forEach((item, index) => {
+          const s = item.meta?.season || 1;
+          const e = item.meta?.episode || (index + 1);
+          if (!seasons[s]) seasons[s] = [];
+          seasons[s].push({ ep: e, index: index });
         });
-    }
 
-    /* =====================================================
-       SAVE PROGRESS
-    ===================================================== */
+        const seasonSelect = document.getElementById('season-select');
+        const epSelect = document.getElementById('episode-select');
 
-    function saveProgress() {
-        const meta = getMeta();
-        if (!meta) return;
+        if (!seasonSelect || Object.keys(seasons).length === 0) return;
 
-        localStorage.setItem(STORAGE_KEY, JSON.stringify({
-            season: meta.season,
-            episode: meta.episode,
-            time: player.currentTime(),
-            speed: player.playbackRate(),
-            dub: currentDub,
-            provider: currentProvider
-        }));
-    }
+        seasonSelect.style.display = 'block';
+        epSelect.style.display = 'block';
+        seasonSelect.innerHTML = '';
+        epSelect.innerHTML = '';
 
-});
+        Object.keys(seasons).sort((a, b) => a - b).forEach(sNum => {
+          const opt = document.createElement('option');
+          opt.value = sNum; opt.innerText = 'Сезон ' + sNum;
+          seasonSelect.appendChild(opt);
+        });
 
-/* =====================================================
-   SEASON / EPISODE SELECTORS (RESTORED)
-===================================================== */
-
-function buildSelectors() {
-    if (!Array.isArray(rawPlaylist) || rawPlaylist.length < 2) return;
-
-    const seasonSelect = document.getElementById('season-select');
-    const episodeSelect = document.getElementById('episode-select');
-    if (!seasonSelect || !episodeSelect) return;
-
-    const seasons = {};
-
-    rawPlaylist.forEach((item, index) => {
-        const s = item.meta?.season ?? 1;
-        const e = item.meta?.episode ?? index + 1;
-        if (!seasons[s]) seasons[s] = [];
-        seasons[s].push({ ep: e, index });
-    });
-
-    seasonSelect.innerHTML = '';
-    episodeSelect.innerHTML = '';
-    seasonSelect.style.display = 'block';
-    episodeSelect.style.display = 'block';
-
-    Object.keys(seasons)
-        .sort((a, b) => a - b)
-        .forEach(s => {
+        function updateEpisodes(sNum) {
+          epSelect.innerHTML = '';
+          const eps = seasons[sNum];
+          eps.sort((a, b) => a.ep - b.ep);
+          eps.forEach(item => {
             const opt = document.createElement('option');
-            opt.value = s;
-            opt.textContent = `Сезон ${s}`;
-            seasonSelect.appendChild(opt);
-        });
-
-    function fillEpisodes(season) {
-        episodeSelect.innerHTML = '';
-        seasons[season]
-            .sort((a, b) => a.ep - b.ep)
-            .forEach(item => {
-                const opt = document.createElement('option');
-                opt.value = item.index;
-                opt.textContent = `Серія ${item.ep}`;
-                episodeSelect.appendChild(opt);
-            });
-    }
-
-    seasonSelect.onchange = () => {
-        fillEpisodes(seasonSelect.value);
-        const first = seasons[seasonSelect.value]?.[0];
-        if (first) player.playlist.currentItem(first.index);
-    };
-
-    episodeSelect.onchange = () => {
-        player.playlist.currentItem(parseInt(episodeSelect.value));
-    };
-
-    // init
-    const firstSeason = Object.keys(seasons).sort((a, b) => a - b)[0];
-    seasonSelect.value = firstSeason;
-    fillEpisodes(firstSeason);
-
-    // sync on playlist change
-    player.on('playlistitem', () => {
-        const idx = player.playlist.currentItem();
-        const meta = rawPlaylist[idx]?.meta;
-        if (!meta) return;
-
-        if (seasonSelect.value != meta.season) {
-            seasonSelect.value = meta.season;
-            fillEpisodes(meta.season);
+            opt.value = item.index; opt.innerText = 'Серія ' + item.ep;
+            epSelect.appendChild(opt);
+          });
         }
-        episodeSelect.value = idx;
-    });
-}
+
+        seasonSelect.onchange = function () {
+          updateEpisodes(this.value);
+          if (seasons[this.value] && seasons[this.value][0]) {
+            player.playlist.currentItem(seasons[this.value][0].index);
+          }
+        };
+
+        epSelect.onchange = function () {
+          player.playlist.currentItem(parseInt(this.value));
+        };
+
+        const firstSeason = Object.keys(seasons).sort((a, b) => a - b)[0];
+        if (firstSeason) updateEpisodes(firstSeason);
+
+        player.on('playlistitem', function () {
+          const idx = player.playlist.currentItem();
+          const currentItem = rawPlaylist[idx];
+          if (currentItem && currentItem.meta) {
+            const s = currentItem.meta.season;
+            if (seasonSelect.value != s) {
+              seasonSelect.value = s;
+              updateEpisodes(s);
+            }
+            epSelect.value = idx;
+          }
+        });
+      }
+
+    }
+  }
+});
