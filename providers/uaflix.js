@@ -171,22 +171,12 @@ module.exports = {
 
                 if (players.length === 0) return null;
 
-                const results = [];
+                const ashdiResults = [];
+                const uaflixResults = [];
                 for (const player of players) {
                     try {
-                        let providerName = `UaFlix - ${player.name}`;
-                        if (player.src.includes('ashdi.vip') || player.name.toLowerCase().includes('ashdi')) {
-                            // providerName = 'Ashdi'; // Видаляємо це, щоб не дублювати назву
-                            // Якщо це Ashdi, ми можемо спробувати повернути "Ashdi" як ім'я провайдера
-                            // Але структура тут: providerName йде в 'title', який потім стає 'dub'
-                        }
-                        
-                        // Спрощуємо назву для Movie
-                        if (player.name.toLowerCase().includes('ashdi')) {
-                            providerName = 'Ashdi';
-                        } else {
-                            providerName = player.name; // Просто "Озвучка X" без "Uaflix - "
-                        }
+                        const isAshdi = player.src.includes('ashdi.vip') || player.name.toLowerCase().includes('ashdi');
+                        const providerName = player.name;
 
                         let m3u8Link = "";
                         let subtitlesArr = [];
@@ -219,19 +209,24 @@ module.exports = {
                                 proxyLink += `&subtitles=${encodeURIComponent(JSON.stringify(subtitlesArr))}`;
                             }
 
-                            results.push({
+                            const item = {
                                 title: providerName,
                                 file: proxyLink,
                                 poster: fullPosterUrl,
                                 subtitle: subtitlesArr.length > 0 ? subtitlesArr : null,
-                                provider: 'Ashdi' // Спробуємо підказати агрегатору
-                            });
+                            };
+                            if (isAshdi) ashdiResults.push(item);
+                            else uaflixResults.push(item);
                         }
                     } catch (err) {
                         console.error(`Error processing player ${player.name}:`, err.message);
                     }
                 }
-                return results.length > 0 ? results : null;
+                if (!ashdiResults.length && !uaflixResults.length) return null;
+                const routes = {};
+                if (ashdiResults.length) routes.ashdi = ashdiResults;
+                if (uaflixResults.length) routes.uaflix = uaflixResults;
+                return { _routes: routes };
             }
 
             // --- СЕРІАЛИ (TV) ---
@@ -277,6 +272,7 @@ module.exports = {
                 });
 
                 const finalResult = [];
+                const ashdiSerialResult = [];
                 let firstEpisodeUrl = null;
                 if (allEpisodesList.length > 0) {
                     allEpisodesList.sort((a, b) => {
@@ -330,24 +326,18 @@ module.exports = {
                                                 folder: seasonsMap[sn].sort((a,b)=>a.episode-b.episode)
                                             }));
 
-                                            finalResult.push({
-                                                title: voiceName, // БУЛО: `Ashdi (${voiceName})`. СТАЛО: просто ім'я озвучки
+                                            ashdiSerialResult.push({
+                                                title: voiceName,
                                                 folder: playlist,
-                                                provider: 'Ashdi' // Додаємо маркер для агрегатора
                                             });
                                         }
                                         continue; 
                                     }
                                 }
 
-                                // Fallback
-                                let providerName = tabName; // БУЛО: `UaFlix - ${tabName}`
-                                if (iframeSrc.includes('ashdi.vip/vod/') || tabName.toLowerCase().includes('ashdi')) {
-                                    // Якщо назва табу містить Ashdi, можна просто залишити "Ashdi" або "Озвучка"
-                                    // Але часто tabName це і є озвучка.
-                                    // Якщо хочемо об'єднати всі Ashdi VOD під одним ім'ям:
-                                    // providerName = 'Ashdi'; 
-                                }
+                                // Fallback (zetvideo або інше джерело)
+                                const isAshdiTab = iframeSrc.includes('ashdi.vip') || tabName.toLowerCase().includes('ashdi');
+                                let providerName = tabName;
 
                                 const seasons = Object.keys(episodesMap).sort((a, b) => a - b);
                                 const playlist = seasons.map(seasonNum => {
@@ -363,10 +353,11 @@ module.exports = {
                                     return { title: `Сезон ${seasonNum}`, folder: episodes };
                                 });
 
-                                const existing = finalResult.find(r => r.title === providerName);
+                                const targetArr = isAshdiTab ? ashdiSerialResult : finalResult;
+                                const existing = targetArr.find(r => r.title === providerName);
                                 if (existing) providerName += ` ${i + 1}`;
 
-                                finalResult.push({ title: providerName, folder: playlist });
+                                targetArr.push({ title: providerName, folder: playlist });
                             }
                         } else {
                             console.log('[UAFlix] No tabs found, checking single video-box');
@@ -392,16 +383,15 @@ module.exports = {
                                              title: `Сезон ${sn}`,
                                              folder: seasonsMap[sn].sort((a,b)=>a.episode-b.episode)
                                          }));
-                                         finalResult.push({
-                                             title: voiceName, // Без "Ashdi"
+                                         ashdiSerialResult.push({
+                                             title: voiceName,
                                              folder: playlist,
-                                             provider: 'Ashdi'
                                          });
                                     }
                                 }
                             } else if (iframeSrc) {
-                                let providerName = 'Основний';
-                                if (iframeSrc.includes('ashdi')) providerName = 'Ashdi';
+                                const isAshdiSingle = iframeSrc.includes('ashdi');
+                                const providerName = 'Основний';
                                 const seasons = Object.keys(episodesMap).sort((a, b) => a - b);
                                 const playlist = seasons.map(seasonNum => {
                                     const episodes = episodesMap[seasonNum]
@@ -415,7 +405,8 @@ module.exports = {
                                         }));
                                     return { title: `Сезон ${seasonNum}`, folder: episodes };
                                 });
-                                finalResult.push({ title: providerName, folder: playlist });
+                                if (isAshdiSingle) ashdiSerialResult.push({ title: providerName, folder: playlist });
+                                else finalResult.push({ title: providerName, folder: playlist });
                             }
                         }
                     } catch (e) {
@@ -423,7 +414,11 @@ module.exports = {
                     }
                 }
 
-                return finalResult.length > 0 ? finalResult : null;
+                if (!ashdiSerialResult.length && !finalResult.length) return null;
+                const routes = {};
+                if (ashdiSerialResult.length) routes.ashdi = ashdiSerialResult;
+                if (finalResult.length) routes.uaflix = finalResult;
+                return { _routes: routes };
             }
 
         } catch (e) {
