@@ -39,6 +39,8 @@ html, body {
   position: relative;
   width: 100%; height: 100%;
   display: block;
+  overflow: hidden !important;
+  clip-path: inset(0);
 }
 
 /* === VIDEO.JS BASE === */
@@ -49,6 +51,7 @@ html, body {
   background: black;
   font-size: 14px;
   user-select: none;
+  overflow: hidden !important;
 }
 
 /* === BIG PLAY BUTTON === */
@@ -225,5 +228,60 @@ html, body {
     width: 100% !important; height: 100% !important;
     z-index: 1 !important;
     overflow: hidden;
+    clip-path: none;
 }
 body.vjs-full-window { overflow: hidden; margin: 0; }
+
+/* === MOBILE RESPONSIVE === */
+@media (max-width: 540px) {
+  /* Зменшуємо контрол-бар */
+  .video-js .vjs-control-bar {
+    left: 8px; right: 8px; bottom: 8px;
+    height: 48px;
+    padding: 0 6px;
+    border-radius: 12px;
+  }
+
+  /* Зменшуємо кнопки */
+  .video-js .vjs-button {
+    width: 36px;
+  }
+
+  /* Іконки у кнопках */
+  .video-js .vjs-icon-placeholder:before {
+    font-size: 20px;
+    line-height: 48px;
+  }
+
+  /* Час */
+  .video-js .vjs-time-control {
+    line-height: 48px;
+    font-size: 11px;
+    padding: 0 1px;
+    min-width: 0;
+  }
+
+  /* Прибираємо слайдер гучності на мобільних — залишаємо тільки кнопку */
+  .video-js .vjs-volume-panel { margin-right: 4px; }
+  .video-js .vjs-volume-panel:hover .vjs-volume-control,
+  .video-js .vjs-volume-panel.vjs-hover .vjs-volume-control,
+  .video-js .vjs-volume-panel.vjs-slider-active .vjs-volume-control {
+    width: 0 !important;
+    opacity: 0 !important;
+  }
+
+  /* Прогрес-бар */
+  .video-js .vjs-progress-control { margin: 0 6px; }
+
+  /* Менше відступів у хедері */
+  #player-header { padding: 10px; }
+  .ep-select { font-size: 11px; padding: 4px 6px; max-width: 110px; }
+
+  /* Зменшуємо меню налаштувань */
+  #settings-menu {
+    bottom: 64px;
+    right: 8px;
+    width: 220px;
+    max-height: 65%;
+  }
+}
