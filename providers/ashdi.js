@@ -2,14 +2,18 @@ const axios = require('axios');
 const cheerio = require('cheerio');
 const proxyManager = require('../utils/proxyManager');
 
+// ─── Klon.fun (основне джерело) ───────────────────────────────────────────────
 const BASE_URL = 'https://klon.fun';
 const SEARCH_URL = `${BASE_URL}/engine/ajax/controller.php?mod=search`;
-
-// Домен потрібен лише для обходу/навігації по iframe-сторінках.
-// HLS media URLs (m3u8/ts/m4s/mp4...) НЕ переписуємо на нього,
-// інакше браузер починає тягнути сегменти з іншого origin та ловить CORS.
 const MY_PROXY = 'ashdi.aartzz.pp.ua';
 
+// ─── Wormhole (DB з парсингу) ─────────────────────────────────────────────────
+const WORMHOLE_URL = 'https://wh.lme.isroot.in';
+
+// ─── UaTUT ────────────────────────────────────────────────────────────────────
+const UATUT_URL = 'https://tv.uatut.fun/watch';
+
+// ─── Заголовки ────────────────────────────────────────────────────────────────
 const BASE_HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
 };
@@ -20,9 +24,8 @@ const NAV_HEADERS = {
     'Accept-Language': 'uk-UA,uk;q=0.9,en-US;q=0.8,en;q=0.7'
 };
 
-const fix = s => typeof s === 'string'
-    ? s.replace(/0yql3tj/g, 'oyql3tj')
-    : s;
+// ─── Утиліти ──────────────────────────────────────────────────────────────────
+const fix = s => typeof s === 'string' ? s.replace(/0yql3tj/g, 'oyql3tj') : s;
 
 function safeParse(str) {
     if (!str) return null;
@@ -53,9 +56,7 @@ function normalizeUrl(url) {
 
 function isMediaUrl(url) {
     if (!url || typeof url !== 'string') return false;
-
     const clean = url.split('?')[0].split('#')[0].toLowerCase();
-
     return (
         clean.includes('.m3u8') ||
         clean.includes('.ts') ||
@@ -74,15 +75,19 @@ function isMediaUrl(url) {
 function rewriteAshdiNavigationUrl(url) {
     const out = normalizeUrl(url);
     if (!out) return out;
-
     return out
         .replace(/https?:\/\/ashdi\.vip/gi, `https://${MY_PROXY}`)
         .replace(/https?:\/\/ashdi\.[a-z0-9.-]+/gi, `https://${MY_PROXY}`);
 }
 
 function rewriteAshdiMediaUrl(url) {
-    // Для media не чіпаємо origin — віддаємо пряме посилання.
-    return normalizeUrl(url);
+    const out = normalizeUrl(url);
+    if (!out) return out;
+    // VOD/Serial посилання проксюємо, CDN media (m3u8/ts/...) не чіпаємо
+    if (/https?:\/\/ashdi\.vip\/(vod|serial)\//i.test(out)) {
+        return out.replace(/https?:\/\/ashdi\.vip/gi, `https://${MY_PROXY}`);
+    }
+    return out;
 }
 
 function rewriteUrl(url, { media = false } = {}) {
@@ -97,7 +102,7 @@ function normalizeSearchQuery(imdbId, fallbackTitle) {
 function cleanTitle(s) {
     return (s || '')
         .toLowerCase()
-        .replace(/['’`ʼ"]/g, '')
+        .replace(/[''`ʼ"]/g, '')
         .replace(/ё/g, 'е')
         .replace(/[^a-z0-9а-яіїєґ\s]/gi, ' ')
         .replace(/\s+/g, ' ')
@@ -109,13 +114,11 @@ function extractYearFromText(text) {
     return m ? parseInt(m[0], 10) : null;
 }
 
+// ─── Klon.fun логіка ──────────────────────────────────────────────────────────
 async function fetchUserHash(axiosConfig) {
     const { data: html } = await axios.get(BASE_URL + '/', {
         ...axiosConfig,
-        headers: {
-            ...NAV_HEADERS,
-            'Referer': BASE_URL + '/'
-        },
+        headers: { ...NAV_HEADERS, 'Referer': BASE_URL + '/' },
         timeout: 15000
     });
 
@@ -163,10 +166,7 @@ async function searchTitle(query, axiosConfig) {
         if (!/\.html(?:\?|$)/i.test(href)) return;
         if (/do=search|subaction=search|mode=advanced/i.test(href)) return;
 
-        results.push({
-            title,
-            url: absoluteUrl(href)
-        });
+        results.push({ title, url: absoluteUrl(href) });
     });
 
     const uniq = new Map();
@@ -222,10 +222,7 @@ async function getIframe(postUrl, axiosConfig) {
     try {
         const { data: html } = await axios.get(postUrl, {
             ...axiosConfig,
-            headers: {
-                ...NAV_HEADERS,
-                'Referer': BASE_URL + '/'
-            },
+            headers: { ...NAV_HEADERS, 'Referer': BASE_URL + '/' },
             timeout: 15000
         });
 
@@ -244,21 +241,19 @@ async function getIframe(postUrl, axiosConfig) {
         src = absoluteUrl(src, postUrl);
         src = rewriteUrl(src, { media: false });
 
-        // multivoice для vod
         if (/\/vod\/\d+/i.test(src) && !src.includes('multivoice')) {
             src += (src.includes('?') ? '&' : '?') + 'multivoice';
         }
 
         return src;
     } catch (e) {
-        console.error('[Ashdi] getIframe error:', e.message);
+        console.error('[Ashdi/Klon] getIframe error:', e.message);
         return null;
     }
 }
 
+// ─── Парсер плеєра (спільний для всіх джерел) ────────────────────────────────
 function parsePlayer(html, fallbackTitle) {
-    // Для multivoice у ashdi основна озвучка зазвичай має id, що збігається
-    // з цифрами у player id. Напр.: id="videoplayer232851" => mainVoiceId = "232851".
     const mainVoiceId = (
         html.match(/\bid\s*[:=]\s*["']videoplayer(\d+)["']/i)?.[1] ||
         html.match(/\bid\s*=\s*["']videoplayer(\d+)["']/i)?.[1] ||
@@ -308,7 +303,6 @@ function parsePlayer(html, fallbackTitle) {
     }
 
     if (Array.isArray(parsed) && parsed[0]?.file) {
-        // Якщо це multivoice масив — піднімемо основну озвучку (id == mainVoiceId) нагору.
         const sorted = mainVoiceId
             ? [...parsed].sort((a, b) => {
                 const aMain = String(a?.id ?? '') === String(mainVoiceId);
@@ -325,7 +319,6 @@ function parsePlayer(html, fallbackTitle) {
             file: rewriteUrl(i.file, { media: true }),
             poster: rewriteUrl(i.poster, { media: true }) || globalPoster,
             subtitle: rewriteUrl(i.subtitle, { media: true }) || globalSubtitle,
-            // зберігаємо id озвучки, може бути корисно для фронта/дебага
             voiceId: i.id != null ? String(i.id) : undefined
         }));
     }
@@ -375,7 +368,6 @@ function parsePlayer(html, fallbackTitle) {
 
     if (!results.length) return null;
 
-    // Додатково: якщо зібрали плоский список (в т.ч. з folder) — також піднімемо основну озвучку.
     if (mainVoiceId) {
         results.sort((a, b) => {
             const aMain = String(a?.voiceId ?? '') === String(mainVoiceId);
@@ -389,30 +381,158 @@ function parsePlayer(html, fallbackTitle) {
     return results;
 }
 
-module.exports = {
-    getLinks: async (imdbId, title, year = null) => {
-        const axiosConfig = proxyManager.getConfig('ashdi');
-
-        try {
-            const postUrl = await findBestPostUrl(imdbId, title, year, axiosConfig);
-            if (!postUrl) return null;
-
-            const iframe = await getIframe(postUrl, axiosConfig);
-            if (!iframe) return null;
-
-            const html = (await axios.get(iframe, {
-                ...axiosConfig,
-                headers: {
-                    'User-Agent': BASE_HEADERS['User-Agent']
-                },
-                timeout: 15000
-            })).data;
-
-            return parsePlayer(html, title);
-
-        } catch (e) {
-            console.error('[Ashdi] getLinks error:', e.message);
-            return null;
+// ─── Отримання посилань за прямим URL ashdi ───────────────────────────────────
+async function getLinksFromAshdiUrl(ashdiUrl, title, signal) {
+    const axiosConfig = { ...proxyManager.getConfig('ashdi'), ...(signal ? { signal } : {}) };
+    try {
+        let url = normalizeUrl(ashdiUrl);
+        url = rewriteUrl(url, { media: false });
+        if (/\/vod\/\d+/i.test(url) && !url.includes('multivoice')) {
+            url += (url.includes('?') ? '&' : '?') + 'multivoice';
         }
+        const html = (await axios.get(url, {
+            ...axiosConfig,
+            headers: { 'User-Agent': BASE_HEADERS['User-Agent'] },
+            timeout: 15000
+        })).data;
+        return parsePlayer(html, title);
+    } catch (e) {
+        if (axios.isCancel(e)) return null;
+        console.error('[Ashdi] getLinksFromAshdiUrl error:', e.message);
+        return null;
+    }
+}
+
+// ─── Джерело 1: Klon.fun ──────────────────────────────────────────────────────
+async function getFromKlonFun(imdbId, title, year, signal) {
+    const axiosConfig = { ...proxyManager.getConfig('ashdi'), ...(signal ? { signal } : {}) };
+    try {
+        const postUrl = await findBestPostUrl(imdbId, title, year, axiosConfig);
+        if (!postUrl) return null;
+
+        const iframe = await getIframe(postUrl, axiosConfig);
+        if (!iframe) return null;
+
+        const html = (await axios.get(iframe, {
+            ...axiosConfig,
+            headers: { 'User-Agent': BASE_HEADERS['User-Agent'] },
+            timeout: 15000
+        })).data;
+
+        return parsePlayer(html, title);
+    } catch (e) {
+        if (axios.isCancel(e)) return null;
+        console.error('[Ashdi/Klon] getFromKlonFun error:', e.message);
+        return null;
+    }
+}
+
+// ─── Джерело 2: Wormhole ──────────────────────────────────────────────────────
+async function getFromWormhole(imdbId, title, signal) {
+    if (!imdbId) return null;
+    try {
+        const { data } = await axios.get(`${WORMHOLE_URL}/?imdb_id=${imdbId}`, {
+            headers: BASE_HEADERS,
+            timeout: 10000,
+            ...(signal ? { signal } : {})
+        });
+
+        const ashdiUrl = data?.play;
+        if (!ashdiUrl || typeof ashdiUrl !== 'string' || !ashdiUrl.includes('ashdi')) return null;
+
+        return await getLinksFromAshdiUrl(ashdiUrl, title, signal);
+    } catch (e) {
+        if (axios.isCancel(e)) return null;
+        console.error('[Ashdi/Wormhole] error:', e.message);
+        return null;
+    }
+}
+
+// ─── Джерело 3: UaTUT ─────────────────────────────────────────────────────────
+async function getFromUaTUT(imdbId, title, signal) {
+    try {
+        const query = imdbId || title;
+        if (!query) return null;
+
+        const { data: results } = await axios.get(
+            `${UATUT_URL}/search.php?q=${encodeURIComponent(query)}`,
+            {
+                headers: BASE_HEADERS,
+                timeout: 10000,
+                ...(signal ? { signal } : {})
+            }
+        );
+
+        if (!Array.isArray(results) || !results.length) return null;
+
+        const match = imdbId
+            ? (results.find(r => r.imdb_id === imdbId) || results[0])
+            : results[0];
+
+        if (!match?.id) return null;
+
+        const { data: html } = await axios.get(`${UATUT_URL}/${match.id}`, {
+            headers: BASE_HEADERS,
+            timeout: 10000,
+            ...(signal ? { signal } : {})
+        });
+
+        const $ = cheerio.load(html);
+        const ashdiSrc = $('iframe[src*="ashdi.vip"]').attr('src');
+        if (!ashdiSrc) return null;
+
+        return await getLinksFromAshdiUrl(ashdiSrc, title || match.title, signal);
+    } catch (e) {
+        if (axios.isCancel(e)) return null;
+        console.error('[Ashdi/UaTUT] error:', e.message);
+        return null;
+    }
+}
+
+// ─── Multirequest: перший результат перемагає ────────────────────────────────
+function raceFirst(tasks) {
+    return new Promise((resolve) => {
+        const controller = new AbortController();
+        const { signal } = controller;
+
+        let remaining = tasks.length;
+        let resolved = false;
+
+        if (remaining === 0) {
+            resolve(null);
+            return;
+        }
+
+        tasks.forEach(task => {
+            task(signal)
+                .then(result => {
+                    if (resolved) return;
+                    if (result && Array.isArray(result) && result.length > 0) {
+                        resolved = true;
+                        controller.abort();
+                        resolve(result);
+                    } else {
+                        remaining--;
+                        if (remaining === 0 && !resolved) resolve(null);
+                    }
+                })
+                .catch(() => {
+                    remaining--;
+                    if (remaining === 0 && !resolved) resolve(null);
+                });
+        });
+    });
+}
+
+// ─── Публічний API ────────────────────────────────────────────────────────────
+module.exports = {
+    getLinksFromAshdiUrl,
+
+    getLinks: async (imdbId, title, year = null) => {
+        return raceFirst([
+            signal => getFromWormhole(imdbId, title, signal),
+            signal => getFromUaTUT(imdbId, title, signal),
+            signal => getFromKlonFun(imdbId, title, year, signal)
+        ]);
     }
 };
