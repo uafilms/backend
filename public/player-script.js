@@ -283,9 +283,66 @@ document.addEventListener('DOMContentLoaded', function () {
         }
       });
 
+      // Парсить "webm quality-list" відповідь зі stream endpoint
+      function parseMoonAnimeQualityList(text) {
+        const entries = [];
+        text.trim().split(',').forEach(part => {
+          const m = part.trim().match(/^\[([^\]]+)\](https?:\/\/.+)$/);
+          if (m) entries.push({ quality: m[1].trim(), url: m[2].trim() });
+        });
+        return entries;
+      }
+
+      // Оновлює allSources і sources у rawPlaylist[idx] webm-варіантами
+      function applyWebmToItem(idx, entries) {
+        const item = rawPlaylist[idx];
+        if (!item) return;
+        const baseSource = item.meta?.allSources?.find(s => s.url && s.url.includes('/api/moonanime/stream/')) || item.meta?.allSources?.[0] || {};
+        const webmSources = entries.map(e => ({ ...baseSource, url: e.url, type: 'video/webm', quality: e.quality }));
+        if (item.meta) {
+          item.meta.allSources = [
+            ...(item.meta.allSources || []).filter(s => !s.url?.includes('/api/moonanime/stream/')),
+            ...webmSources
+          ];
+        }
+        if (item.sources) item.sources = [{ src: entries[0].url, type: 'video/webm', subtitles: item.sources[0]?.subtitles }];
+      }
+
+      // Фетчить stream URL, якщо отримує quality-list — повертає entries через callback
+      function tryResolveMoonAnimeWebm(src, onResolved) {
+        if (!src || !src.includes('/api/moonanime/stream/')) return;
+        fetch(src)
+          .then(r => r.text())
+          .then(text => {
+            if (text.trimStart().startsWith('#EXTM3U')) return; // це справжній m3u8
+            const entries = parseMoonAnimeQualityList(text);
+            if (entries.length > 0) onResolved(entries);
+          })
+          .catch(() => {});
+      }
+
       if (typeof rawPlaylist !== 'undefined' && Array.isArray(rawPlaylist) && rawPlaylist.length > 0) {
-        player.playlist(rawPlaylist);
-        player.playlist.autoadvance(0);
+        const loadPlaylist = () => {
+          player.playlist(rawPlaylist);
+          player.playlist.autoadvance(0);
+        };
+
+        // Pre-fetch першого айтему щоб уникнути VHS retry-loop для webm контенту
+        const initSrc = rawPlaylist[0]?.sources?.[0]?.src;
+        if (initSrc && initSrc.includes('/api/moonanime/stream/')) {
+          fetch(initSrc)
+            .then(r => r.text())
+            .then(text => {
+              if (!text.trimStart().startsWith('#EXTM3U')) {
+                const entries = parseMoonAnimeQualityList(text);
+                if (entries.length > 0) applyWebmToItem(0, entries);
+              }
+            })
+            .catch(() => {})
+            .finally(loadPlaylist);
+        } else {
+          loadPlaylist();
+        }
       }
 
       function bindQualityLevelListeners() {
@@ -347,6 +404,22 @@ document.addEventListener('DOMContentLoaded', function () {
 
       player.on('playlistitem', () => {
         const idx = player.playlist.currentItem();
+
+        // Resolve webm для поточного айтему (якщо ще не зроблено)
+        const itemSrc = rawPlaylist[idx]?.sources?.[0]?.src;
+        if (itemSrc && itemSrc.includes('/api/moonanime/stream/')) {
+          tryResolveMoonAnimeWebm(itemSrc, (entries) => {
+            applyWebmToItem(idx, entries);
+            // Перекриваємо VHS який вже почав retry-loop
+            if (player.playlist && player.playlist.currentItem() === idx) {
+              player.src({ src: entries[0].url, type: 'video/webm' });
+              player.play().catch(() => {});
+              updateQualityMenu(player);
+              updateAudioMenu(player);
+            }
+          });
+        }
+
         const meta = rawPlaylist[idx]?.meta;
 
         if (!isRestoring) {

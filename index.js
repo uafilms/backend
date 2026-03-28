@@ -369,7 +369,12 @@ async function getLinks(metadata, host, activeProviders) {
     const results = {};
     const promises = Object.entries(activeProviders).map(async ([name, func]) => {
         try {
-            results[name] = await func(metadata, host);
+            const data = await func(metadata, host);
+            if (data && data._routes) {
+                Object.assign(results, data._routes);
+            } else {
+                results[name] = data;
+            }
         } catch (e) {
             console.error(`Provider ${name} failed:`, e.message);
             results[name] = [];
@@ -437,6 +442,9 @@ app.get('/api/get', checkTurnstile, async (req, res) => {
         res.setHeader('Content-Type', 'text/event-stream');
         res.setHeader('Cache-Control', 'no-cache');
         res.setHeader('Connection', 'keep-alive');
+        res.setHeader('X-Accel-Buffering', 'no');
+        res.flushHeaders();
+        if (req.socket) req.socket.setNoDelay(true);
         try {
             let fullData = cache.get(fullCacheKey);
             if (fullData) {
@@ -478,12 +486,16 @@ app.get('/api/get', checkTurnstile, async (req, res) => {
             const promises = Object.entries(activeProviders).map(async ([name, func]) => {
                 try {
                     const links = await func(metaData, host);
-                    if (links && (Array.isArray(links) ? links.length > 0 : Object.keys(links).length > 0)) {
-                        updateCacheIncrementally({ [name]: links });
-                        const chunkMeta = { ...metaData, links: { [name]: links } };
+                    if (!links) return;
+                    const routes = (links && links._routes) ? links._routes : { [name]: links };
+                    for (const [routeName, routeLinks] of Object.entries(routes)) {
+                        if (!routeLinks || (Array.isArray(routeLinks) ? routeLinks.length === 0 : Object.keys(routeLinks).length === 0)) continue;
+                        updateCacheIncrementally({ [routeName]: routeLinks });
+                        const chunkMeta = { ...metaData, links: { [routeName]: routeLinks } };
                         const normalizedChunk = normalizeResponse(chunkMeta, type, token);
-                        const payload = { provider: name, sources: normalizedChunk.sources, seasons: normalizedChunk.seasons };
+                        const payload = { provider: routeName, sources: normalizedChunk.sources, seasons: normalizedChunk.seasons };
                         res.write(`data: ${JSON.stringify(payload)}\n\n`);
+                        if (typeof res.flush === 'function') res.flush();
                     }
                 } catch (e) {}
             });
@@ -732,50 +744,239 @@ app.get('/api/uaflix/proxy/:filename?', checkTurnstile, async (req, res) => {
     } catch (e) { if (!res.headersSent) res.status(e.response ? e.response.status : 500).send("Proxy error"); }
 });
 
-app.get('/api/moonanime/stream/:vodId', checkTurnstile, async (req, res) => {
-    // ... (без змін)
+// Хелпери для декодування moonanime — винесені поза роут
+function moonOuterDecode(html) {
+    const m = html.match(/var _\w+=atob\("([^"]+)"\)/);
+    if (!m) return null;
+    const b = Buffer.from(m[1], 'base64');
+    const k = b.slice(0, 32);
+    const x = Buffer.alloc(b.length - 32);
+    for (let i = 0; i < x.length; i++) x[i] = b[i + 32] ^ k[i % 32];
+    return x.toString('utf-8');
+}
+
+function moonInnerDecode(encoded) {
+    const key = 'mAnK';
+    const b = Buffer.from(encoded, 'base64');
+    let r = '';
+    for (let i = 0; i < b.length; i++) {
+        r += String.fromCharCode(b[i] ^ key.charCodeAt(i % key.length));
+    }
+    try { return decodeURIComponent(escape(r)); } catch { return r; }
+}
+
+const MOON_VOD_HEADERS = {
+    'user-agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36',
+    'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+    'accept-language': 'uk-UA,uk;q=0.9,en-US;q=0.8,en;q=0.7',
+    'sec-fetch-dest': 'document',
+    'sec-fetch-mode': 'navigate',
+    'sec-fetch-site': 'none',
+    'sec-fetch-user': '?1',
+    'upgrade-insecure-requests': '1'
+};
+
+app.get('/api/moonanime/stream/master.m3u8', checkTurnstile, async (req, res) => {
     try {
-        const url = `https://moonanime.art/vod/${req.params.vodId}/?partner=lampa`;
-        const response = await axios.get(url, { headers: { 'User-Agent': 'Mozilla/5.0', 'Referer': 'https://moonanime.art/', 'origin': 'http://lampa.mx' } });
-        let file = (response.data.match(/file:\s?["']([^"']+)["']/) || [])[1];
-        if (file) {
-            let targetUrl = file;
-            if (file.includes('[') && file.includes(']')) {
-                const links = {};
-                file.split(',').forEach(part => { const match = part.match(/\[(.*?)\](.*)/); if (match) links[match[1]] = match[2]; });
-                const qualityPriority = ['1080p', '720p', '480p', '360p'];
-                let found = false;
-                for (const q of qualityPriority) { if (links[q]) { targetUrl = links[q]; found = true; break; } }
-                if (!found) { const available = Object.keys(links); if (available.length > 0) targetUrl = links[available[0]]; }
-            }
-            if (targetUrl.includes('.m3u8')) {
-                try {
-                    const m3u8Res = await axios.get(targetUrl, { headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36', 'Referer': 'https://moonanime.art/' } });
-                    const protocol = req.protocol;
-                    const host = req.get('host');
-                    const proxyHost = `${protocol}://${host}`;
-                    const modifiedM3u8 = parseMasterPlaylist(m3u8Res.data, targetUrl, proxyHost);
-                    res.set('Content-Type', 'application/vnd.apple.mpegurl');
-                    return res.send(modifiedM3u8);
-                } catch (e) { console.error("MoonAnime Proxy Error:", e.message); return res.redirect(targetUrl); }
-            }
-            return res.redirect(targetUrl);
+        const vodId = String(req.query.id || '').split('/').filter(Boolean).pop();
+        if (!vodId) return res.status(400).send('Missing id');
+
+        const vodResponse = await axios.get(`https://moonanime.art/vod/${vodId}`, {
+            headers: MOON_VOD_HEADERS,
+            timeout: 15000
+        }).catch(e => { throw new Error(`VOD page fetch failed: ${e.message}`); });
+        const html = vodResponse.data;
+        const cookieHeader = (vodResponse.headers['set-cookie'] || []).map(c => c.split(';')[0]).join('; ');
+
+        // Зовнішній XOR → отримуємо JS з Playerjs config
+        const decodedJs = moonOuterDecode(html);
+        if (!decodedJs) {
+            console.error('[MoonAnime] outer XOR decode failed');
+            return res.status(404).send('Stream not found');
         }
-        res.status(404).send('Stream not found');
-    } catch (e) { res.status(500).send(e.message); }
+
+        // file: _0xd("...")
+        const fileMatch = decodedJs.match(/file:\s*_0xd\("([^"]+)"\)/);
+        if (!fileMatch) {
+            console.error('[MoonAnime] file field not found');
+            return res.status(404).send('Stream not found');
+        }
+
+        const fileValue = moonInnerDecode(fileMatch[1]);
+        if (!fileValue) return res.status(404).send('Stream not found');
+
+        console.log('[MoonAnime] fileValue:', fileValue.substring(0, 200));
+
+        const proxyHost = `${req.protocol}://${req.get('host')}`;
+
+        // fileValue може бути списком якостей: [1080p]url,[720p]url,...
+        // або одним CDN URL: https://s.moonanime.art/content/v/{id}/720/?expires=...
+        if (fileValue.includes('[') && fileValue.includes(']')) {
+            // Побудувати master m3u8 з усіма якостями
+            const qualityMap = { '1080p': 5000000, '720p': 3000000, '480p': 1500000, '360p': 800000 };
+            const resMap = { '1080p': '1920x1080', '720p': '1280x720', '480p': '854x480', '360p': '640x360' };
+
+            const entries = [];
+            fileValue.split(',').forEach(part => {
+                const m = part.match(/\[([^\]]+)\](https?:\/\/.+)/);
+                if (m) entries.push({ quality: m[1].trim(), url: m[2].trim() });
+            });
+
+            if (!entries.length) return res.status(404).send('Stream not found');
+
+            const isWebm = entries.some(e => /\/content\/v\//.test(e.url));
+
+            if (isWebm) {
+                // webm multi-quality — повертаємо Playerjs quality-list
+                // кожна якість йде через /api/moonanime/webm.webm (pipe через наш сервер)
+                // URL закінчується на .webm → type detection дає video/webm, не HLS
+                const qualityList = entries
+                    .map(e => `[${e.quality}]${proxyHost}/api/moonanime/webm.webm?url=${encodeURIComponent(e.url)}`)
+                    .join(',');
+                res.set('Content-Type', 'text/plain; charset=utf-8');
+                return res.send(qualityList);
+            }
+
+            // HLS — Генеруємо master m3u8 де кожна якість — окремий варіант
+            let master = '#EXTM3U\n';
+            for (const e of entries) {
+                const bw = qualityMap[e.quality] || 2000000;
+                const res_ = resMap[e.quality] || '';
+                const proxyUrl = `${proxyHost}/proxy/m3u8?url=${encodeURIComponent(e.url)}`;
+                master += `#EXT-X-STREAM-INF:BANDWIDTH=${bw}${res_ ? `,RESOLUTION=${res_}` : ''},NAME="${e.quality}"\n`;
+                master += `${proxyUrl}\n`;
+            }
+
+            res.set('Content-Type', 'application/vnd.apple.mpegurl');
+            return res.send(master);
+        }
+
+        // Одиночний CDN URL
+        // /content/v/{id}/{quality}/ → webm-тип, пайпимо через наш endpoint
+        if (/\/content\/v\//.test(fileValue)) {
+            return res.redirect(302, `${proxyHost}/api/moonanime/webm.webm?url=${encodeURIComponent(fileValue)}`);
+        }
+
+        // /content/stream/...index.m3u8 → HLS-тип, потрібні sec-fetch заголовки
+        console.log('[MoonAnime] fetching HLS CDN URL:', fileValue.substring(0, 150));
+        const cdnHeaders = {
+            'User-Agent': MOON_VOD_HEADERS['user-agent'],
+            'Origin': 'https://moonanime.art',
+            'Referer': 'https://moonanime.art/',
+            'accept': '*/*',
+            'accept-language': MOON_VOD_HEADERS['accept-language'],
+            'sec-fetch-dest': 'empty',
+            'sec-fetch-mode': 'cors',
+            'sec-fetch-site': 'same-site',
+            'sec-ch-ua': '"Not)A;Brand";v="8", "Chromium";v="138"',
+            'sec-ch-ua-mobile': '?0',
+            'sec-ch-ua-platform': '"Linux"'
+        };
+        if (cookieHeader) cdnHeaders['Cookie'] = cookieHeader;
+        console.log('[MoonAnime] CDN cookies:', cookieHeader || '(none)');
+        const cdnRes = await axios.get(fileValue, { headers: cdnHeaders, timeout: 15000 });
+
+        const content = typeof cdnRes.data === 'string' ? cdnRes.data : JSON.stringify(cdnRes.data);
+
+        if (content.includes('#EXTM3U') || content.includes('#EXT-X')) {
+            const modified = parseMasterPlaylist(content, fileValue, proxyHost, { corsProxySegments: true });
+            res.set('Content-Type', 'application/vnd.apple.mpegurl');
+            return res.send(modified);
+        }
+
+        // JSON з якостями: { "720": "url", "480": "url" }
+        if (typeof cdnRes.data === 'object') {
+            const qualityBw = { '1080': 5000000, '720': 3000000, '480': 1500000, '360': 800000 };
+            let master = '#EXTM3U\n';
+            for (const q of ['1080', '720', '480', '360']) {
+                const url = cdnRes.data[q] || cdnRes.data[q + 'p'];
+                if (!url) continue;
+                master += `#EXT-X-STREAM-INF:BANDWIDTH=${qualityBw[q]},NAME="${q}p"\n${proxyHost}/proxy/m3u8?url=${encodeURIComponent(url)}\n`;
+            }
+            if (master !== '#EXTM3U\n') {
+                res.set('Content-Type', 'application/vnd.apple.mpegurl');
+                return res.send(master);
+            }
+        }
+
+        return res.status(502).send('Unexpected CDN response');
+    } catch (e) {
+        console.error('[MoonAnime] stream error:', e.message, e.response?.status, JSON.stringify(e.response?.data)?.substring(0, 300));
+        res.status(500).send(e.message);
+    }
+});
+
+// Webm pipe: пайпить відео через наш сервер, щоб уникнути CORS проблем CDN.
+// Підтримує Range-запити для seekbar.
+// URL має .webm → type detection у frontend дає video/webm замість HLS.
+app.get('/api/moonanime/webm.webm', checkTurnstile, async (req, res) => {
+    const { url } = req.query;
+    if (!url) return res.status(400).send('Missing url');
+    try {
+        const upstreamHeaders = {
+            'User-Agent': MOON_VOD_HEADERS['user-agent'],
+            'accept': '*/*',
+            'accept-language': MOON_VOD_HEADERS['accept-language'],
+            'dnt': '1',
+            'priority': 'i',
+            'Range': req.headers['range'] || 'bytes=0-',
+            'sec-ch-ua': '"Not)A;Brand";v="8", "Chromium";v="138"',
+            'sec-ch-ua-mobile': '?0',
+            'sec-ch-ua-platform': '"Linux"',
+            'sec-fetch-dest': 'video',
+            'sec-fetch-mode': 'no-cors',
+            'sec-fetch-site': 'cross-site',
+            'sec-fetch-storage-access': 'active',
+            'sec-gpc': '1',
+        };
+
+        const upstream = await axios.get(url, {
+            headers: upstreamHeaders,
+            responseType: 'stream',
+            maxRedirects: 10,
+            timeout: 30000,
+        });
+
+        res.status(upstream.status);
+        const forward = ['content-type', 'content-length', 'content-range', 'accept-ranges'];
+        forward.forEach(h => { if (upstream.headers[h]) res.set(h, upstream.headers[h]); });
+        if (!upstream.headers['content-type']) res.set('Content-Type', 'video/webm');
+
+        upstream.data.pipe(res);
+        req.on('close', () => upstream.data.destroy());
+    } catch (e) {
+        console.error('[MoonAnime] webm pipe error:', e.message);
+        if (!res.headersSent) res.status(502).send(e.message);
+    }
 });
 
 app.get('/proxy/m3u8', checkTurnstile, async (req, res) => {
-    // ... (без змін)
     try {
         const { url } = req.query;
         if (!url) return res.status(400).send('URL required');
-        const headers = { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36', 'Accept': '*/*', };
-        const response = await axios.get(url, { headers });
+
+        const isMoonAnime = url.includes('moonanime.art') || url.includes('mooncdn.space') || url.includes('s.moonanime');
+        const headers = isMoonAnime ? {
+            'User-Agent': MOON_VOD_HEADERS['user-agent'],
+            'Origin': 'https://moonanime.art',
+            'Referer': 'https://moonanime.art/',
+            'accept': '*/*',
+            'accept-language': MOON_VOD_HEADERS['accept-language'],
+            'sec-fetch-dest': 'empty',
+            'sec-fetch-mode': 'cors',
+            'sec-fetch-site': 'same-site',
+        } : {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': '*/*',
+        };
+
         const protocol = req.protocol;
         const host = req.get('host');
         const proxyHost = `${protocol}://${host}`;
-        const modifiedM3u8 = parseMasterPlaylist(response.data, url, proxyHost);
+
+        const response = await axios.get(url, { headers });
+        const corsProxySegments = isMoonAnime;
+        const modifiedM3u8 = parseMasterPlaylist(response.data, url, proxyHost, { corsProxySegments });
         res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
         res.send(modifiedM3u8);
     } catch (e) { console.error("Proxy M3U8 Error:", e.message); res.status(500).send('#EXTM3U\n#EXT-X-ERROR: ' + e.message); }

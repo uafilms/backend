@@ -37,11 +37,10 @@ module.exports = {
                     folder: Object.keys(seasons).map(sNum => ({
                         title: `${sNum} сезон`,
                         folder: seasons[sNum].map(ep => {
-                            const vodId = ep.vod.split('/').filter(Boolean).pop();
+                            const vodId = String(ep.vod).split('/').filter(Boolean).pop();
                             return {
                                 title: ep.title || `${ep.episode} серія`,
-                                file: `${host}/api/moonanime/stream/${vodId}`,
-                                id: vodId,
+                                file: `${host}/api/moonanime/stream/master.m3u8?id=${vodId}`,
                                 poster: ep.poster,
                                 subtitle: ""
                             };
