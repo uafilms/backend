@@ -3,6 +3,7 @@
 // Decodes base64+reversed file URLs to get actual m3u8 links
 
 const axios = require('axios');
+const proxyManager = require('../utils/proxyManager');
 
 // Decode Tortuga file: base64 → reverse → httpr→https
 function decodeTortugaFile(encoded) {
@@ -22,7 +23,8 @@ const HEADERS = {
 // Parse movie VOD page → returns {file: m3u8URL, poster: posterURL}
 async function parseTortugaVod(vodUrl) {
     try {
-        const res = await axios.get(vodUrl, { headers: HEADERS, timeout: 15000 });
+        const proxyConfig = proxyManager.getConfig('tortuga');
+        const res = await axios.get(vodUrl, { headers: HEADERS, timeout: 15000, ...proxyConfig });
         const html = res.data;
         
         // Extract file (m3u8 URL)
@@ -45,7 +47,8 @@ async function parseTortugaVod(vodUrl) {
 // Parse TV series embed page → returns full folder/file JSON
 async function parseTortugaEmbed(embedUrl) {
     try {
-        const res = await axios.get(embedUrl, { headers: HEADERS, timeout: 15000 });
+        const proxyConfig = proxyManager.getConfig('tortuga');
+        const res = await axios.get(embedUrl, { headers: HEADERS, timeout: 15000, ...proxyConfig });
         const html = res.data;
         const fileMatch = html.match(/file\s*:\s*["']([A-Za-z0-9+/=]{20,})["']/);
         if (!fileMatch) return null;
