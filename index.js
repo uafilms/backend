@@ -9,10 +9,16 @@ const cheerio = require('cheerio');
 
 // Імпорти провайдерів
 const tmdb = require('./tmdb');
-const ashdi = require('./providers/ashdi');
-const hdvb = require('./providers/hdvb');
 const moonanime = require('./providers/moonanime');
 const uaflix = require('./providers/uaflix');
+const kinoukr = require('./providers/kinoukr');
+const uaserialsCom = require('./providers/uaserials-com');
+const uaserialsmy = require('./providers/uaserials-my');
+const klon = require('./providers/klon');
+const wormhole = require('./providers/wormhole');
+const uatut = require('./providers/uatut');
+const eneyida = require('./providers/eneyida');
+
 
 // Англомовні провайдери (CinemaOS видалено)
 const uembed = require('./providers/uembed');
@@ -23,7 +29,7 @@ const { searchTorrents } = require('./utils/torrentHandler');
 const { parseUaKinoComments } = require('./utils/commentParser');
 
 const app = express();
-const cache = new NodeCache({ stdTTL: 300 }); 
+const cache = new NodeCache({ stdTTL: 3600 }); 
 const tokenCache = new NodeCache({ stdTTL: 7200, checkperiod: 600 });
 
 app.set('trust proxy', true);
@@ -153,16 +159,37 @@ const fetchWithManualRedirect = async (url, config = {}, retries = 5) => {
 
 function parseSubtitles(subInput) {
     if (!subInput) return [];
-    if (Array.isArray(subInput)) return subInput;
+    if (Array.isArray(subInput)) {
+        // Ensure existing arrays have lang field
+        return subInput.map(sub => {
+            if (sub.lang) return sub;
+            const label = (sub.label || '').toLowerCase();
+            let lang = 'ua'; // default
+            if (label.includes('en') || label.includes('англ') || label.includes('english')) {
+                lang = 'en';
+            } else if (label.includes('ua') || label.includes('укр') || label.includes('ukrainian')) {
+                lang = 'ua';
+            }
+            return { ...sub, lang };
+        });
+    }
     if (typeof subInput !== 'string') return [];
 
     const subs = [];
     const regex = /(?:\[(.*?)\])?(https?:\/\/[^,]+)/g;
     let match;
     while ((match = regex.exec(subInput)) !== null) {
+        const label = match[1] || 'Default';
+        const labelLower = label.toLowerCase();
+        let lang = 'ua'; // default
+        if (labelLower.includes('en') || labelLower.includes('англ') || labelLower.includes('english')) {
+            lang = 'en';
+        } else if (labelLower.includes('ua') || labelLower.includes('укр') || labelLower.includes('ukrainian')) {
+            lang = 'ua';
+        }
         subs.push({ 
-            label: match[1] || 'Default', 
-            lang: (match[1] && match[1].toLowerCase().includes('en')) ? 'en' : 'ua', 
+            label, 
+            lang, 
             url: match[2] 
         });
     }
@@ -220,94 +247,119 @@ async function extractUaflixM3u8(pageUrl, playerIndex = 0) {
     } catch (e) { console.error("Extract Uaflix Error:", e.message); return null; }
 }
 
-function normalizeResponse(tmdbData, type, token = '') {
-    const seasonsMap = new Map();
-    const movieSources = [];
+function normalizeResponse(tmdbData, type, token = '', host = '') {
+    const providers = {};
+    
+    const addMovieSource = (providerName, sourceObj) => {
+        if (!providers[providerName]) providers[providerName] = [];
+        providers[providerName].push(sourceObj);
+    };
+    
+    const addEpisodeSource = (providerName, season, episode, sourceObj) => {
+        if (!providers[providerName]) providers[providerName] = {};
+        const p = providers[providerName];
+        const s = String(season);
+        const e = String(episode);
+        if (!p[s]) p[s] = {};
+        if (!p[s][e]) p[s][e] = [];
+        p[s][e].push(sourceObj);
+    };
     
     const traverse = (providerName, items, context) => {
         if (!Array.isArray(items)) return;
         items.forEach(item => {
             let currentContext = { ...context };
             let rawTitle = item.title || "";
+            
             let sMatch = rawTitle.match(/(?:season|сезон|s)\s*(\d+)/i);
             if (!sMatch) sMatch = rawTitle.match(/(\d+)\s*(?:season|сезон)/i);
             if (sMatch) currentContext.season = parseInt(sMatch[1]);
+            
             let eMatch = rawTitle.match(/(?:episode|серія|ep|e)\s*(\d+)/i);
             if (!eMatch) eMatch = rawTitle.match(/(\d+)\s*(?:episode|серія)/i);
             if (eMatch) currentContext.episode = parseInt(eMatch[1]);
+            
             if (item.folder) {
                 let cleanName = rawTitle;
                 if (sMatch) cleanName = cleanName.replace(sMatch[0], '');
                 if (eMatch) cleanName = cleanName.replace(eMatch[0], '');
                 cleanName = cleanName.replace(/[\(\)\[\]]/g, '').trim();
                 cleanName = cleanName.replace(/^[\s\-\.]+|[\s\-\.]+$/g, '');
-                if (cleanName.length > 0 && !/^\d+$/.test(cleanName)) { currentContext.dub = cleanName; }
+                if (cleanName.length > 0 && !/^\d+$/.test(cleanName)) {
+                    currentContext.dub = cleanName;
+                }
                 traverse(providerName, item.folder, currentContext);
-            } 
-            else if (item.file || item.link || item.url) { 
+            } else if (item.file || item.link || item.url) {
                 let s = currentContext.season || item.season || 1;
                 let e = currentContext.episode || item.episode;
                 let dubName = currentContext.dub || item.name || "Original";
                 let sourceSubtitles = [];
                 
-                if (item.subtitle || item.subtitles) { 
-                    sourceSubtitles = parseSubtitles(item.subtitle || item.subtitles); 
+                if (item.subtitle || item.subtitles) {
+                    sourceSubtitles = parseSubtitles(item.subtitle || item.subtitles);
                 }
                 
-                const createSourceObj = (url, quality = null) => {
+                const createSourceObj = (url) => {
                     let mimeType = 'video/mp4';
-                    if (url.includes('.m3u8') || providerName === 'ashdi' || providerName === 'uaflix' || providerName === 'uembed') { mimeType = 'application/x-mpegURL'; } 
-                    else if (url.includes('.webm')) { mimeType = 'video/webm'; }
+                    if (url.includes('.m3u8') || providerName === 'ashdi' || providerName === 'uaflix' || providerName === 'uembed') {
+                        mimeType = 'application/x-mpegURL';
+                    } else if (url.includes('.webm')) {
+                        mimeType = 'video/webm';
+                    } else if (/tortuga\.tw\/vod\//i.test(url) || /tortuga\.tw\/embed\//i.test(url)) {
+                        mimeType = 'text/html';
+                    }
                     
                     let finalUrl = url;
-                    if (token && (finalUrl.includes('/api/uaflix') || finalUrl.includes('/api/moonanime') || finalUrl.includes('/proxy/m3u8'))) {
+                    // Route Tortuga calypso m3u8 URLs through our proxy (cors.bwa.workers.dev)
+                    if (providerName === 'tortuga' && finalUrl.includes('calypso.tortuga.tw')) {
+                        finalUrl = `${host}/api/tortuga/proxy/master.m3u8?url=${encodeURIComponent(finalUrl)}`;
+                        mimeType = 'application/x-mpegURL';
+                    }
+                    if (token && (finalUrl.includes('/api/uaflix') || finalUrl.includes('/api/moonanime') || finalUrl.includes('/proxy/m3u8') || finalUrl.includes('/api/tortuga'))) {
                         const separator = finalUrl.includes('?') ? '&' : '?';
                         if (!finalUrl.includes('token=')) {
                             finalUrl += `${separator}token=${encodeURIComponent(token)}`;
                         }
                     }
-                    return { 
-                        provider: providerName, 
-                        dub: dubName, 
-                        quality: quality || item.quality || 'Auto', 
-                        url: finalUrl, 
-                        type: mimeType, 
-                        subtitles: sourceSubtitles, 
+                    return {
+                        title: dubName,
+                        url: finalUrl,
+                        mime: mimeType,
+                        subtitles: sourceSubtitles,
                         poster: item.poster || null,
-                        headers: item.headers 
+                        headers: item.headers || null,
                     };
                 };
+                
                 const url = item.file || item.link || item.url;
                 if (providerName === 'moonanime' && url.includes('[')) {
                     const parts = url.split(',');
                     parts.forEach(part => {
                         const m = part.match(/\[(.*?)\](.*)/);
                         if (m) {
-                            const srcObj = createSourceObj(m[2], m[1]);
-                            if (type === 'movie') movieSources.push(srcObj);
-                            else addToSeriesMap(s, e, srcObj, item.poster || tmdbData.poster_path);
+                            const srcObj = createSourceObj(m[2]);
+                            if (type === 'movie') addMovieSource(providerName, srcObj);
+                            else addEpisodeSource(providerName, s, e, srcObj);
                         }
                     });
                 } else {
                     const srcObj = createSourceObj(url);
-                    if (type === 'movie') movieSources.push(srcObj);
-                    else {
-                        if (!e) { const fileTitleMatch = rawTitle.match(/(?:episode|серія|ep|e)\s*(\d+)/i) || rawTitle.match(/(\d+)\s*(?:episode|серія)/i); if (fileTitleMatch) e = parseInt(fileTitleMatch[1]); else e = items.indexOf(item) + 1; }
-                        addToSeriesMap(s, e, srcObj, item.poster || tmdbData.poster_path);
+                    if (type === 'movie') {
+                        addMovieSource(providerName, srcObj);
+                    } else {
+                        if (!e) {
+                            const fileTitleMatch = rawTitle.match(/(?:episode|серія|ep|e)\s*(\d+)/i) || rawTitle.match(/(\d+)\s*(?:episode|серія)/i);
+                            if (fileTitleMatch) e = parseInt(fileTitleMatch[1]);
+                            else e = items.indexOf(item) + 1;
+                        }
+                        addEpisodeSource(providerName, s, e, srcObj);
                     }
                 }
             }
         });
     };
-
-    const addToSeriesMap = (s, e, sourceObj, poster) => {
-        if (!seasonsMap.has(s)) seasonsMap.set(s, new Map());
-        const episodesMap = seasonsMap.get(s);
-        if (!episodesMap.has(e)) { episodesMap.set(e, { season: s, episode: e, title: `Episode ${e}`, poster: poster, sources: [] }); }
-        episodesMap.get(e).sources.push(sourceObj);
-    };
-
-        if (tmdbData.links) {
+    
+    if (tmdbData.links) {
         Object.keys(tmdbData.links).forEach(provider => {
             const providerData = tmdbData.links[provider];
             if (providerData) {
@@ -316,23 +368,8 @@ function normalizeResponse(tmdbData, type, token = '') {
             }
         });
     }
-
-    const response = { 
-        id: tmdbData.id, 
-        imdb_id: tmdbData.imdb_id, 
-        type: tmdbData.type, 
-        title: tmdbData.title, 
-        original_title: tmdbData.original_title, 
-        year: tmdbData.year, 
-        poster_path: tmdbData.poster_path, 
-        backdrop_path: tmdbData.backdrop_path, 
-        overview: tmdbData.overview, 
-        genres: tmdbData.genres, 
-        imdb_rating: tmdbData.imdb_rating 
-    };
-    if (type === 'movie') { response.sources = movieSources; } 
-    else { response.seasons = Array.from(seasonsMap.keys()).sort((a, b) => a - b).map(sNum => { const epMap = seasonsMap.get(sNum); return { number: sNum, episodes: Array.from(epMap.values()).sort((a, b) => a.episode - b.episode) }; }); }
-    return response;
+    
+    return { providers };
 }
 
 async function getMetadata(id, type) {
@@ -353,35 +390,98 @@ async function getMetadata(id, type) {
     };
 }
 
-// Визначення груп провайдерів
-const uaProvidersList = {
-    ashdi: (m) => ashdi.getLinks(m.imdb_id, m.imdb_id ? m.original_title : m.title),
-    hdvb: (m) => hdvb.getLinks(m.title, m.year),
-    moonanime: (m, h) => moonanime.getLinks(m.imdb_id, m.title, m.year, h),
-    uaflix: (m, h) => uaflix.getLinks(m.imdb_id, m.title, m.original_title, m.year, m.type, h)
+// Групи провайдерів: кожна група = raceFirst (перший хто знайшов — перемагає)
+// kinoukr викликається окремо бо повертає І ashdi І tortuga одночасно
+const providerGroups = {
+    ashdi: [
+        (m) => klon.getLinks(m.imdb_id, m.title, m.year),
+        (m) => wormhole.getLinks(m.imdb_id, m.title),
+        (m) => uatut.getLinks(m.imdb_id, m.title),
+    ],
+    hdvb: [
+        (m) => eneyida.getLinks(m.title, m.year),
+        (m) => uaserialsmy.getLinks(m.title, m.original_title, m.year),
+    ],
+    tortuga: [
+        (m) => uaserialsCom.getLinks(m.title, m.original_title, m.year, m.type),
+    ],
+    uaflix: [
+        (m, h) => uaflix.getLinks(m.imdb_id, m.title, m.original_title, m.year, m.type, h),
+    ],
+    moonanime: [
+        (m, h) => moonanime.getLinks(m.imdb_id, m.title, m.year, h),
+    ],
 };
 
-const engProvidersList = {
-    uembed: (m) => uembed.getLinks(m)
+const engProviderGroups = {
+    uembed: [
+        (m) => uembed.getLinks(m),
+    ],
 };
 
-async function getLinks(metadata, host, activeProviders) {
+// RaceFirst: перший успішний результат перемагає
+function raceFirstGroup(tasks, metadata, host) {
+    return new Promise((resolve) => {
+        const controller = new AbortController();
+        const { signal } = controller;
+        let remaining = tasks.length;
+        let resolved = false;
+        if (remaining === 0) { resolve(null); return; }
+        tasks.forEach(task => {
+            task(metadata, host, signal)
+                .then(result => {
+                    if (resolved) return;
+                    if (result) {
+                        resolved = true;
+                        controller.abort();
+                        resolve(result);
+                    } else {
+                        remaining--;
+                        if (remaining === 0 && !resolved) resolve(null);
+                    }
+                })
+                .catch(() => {
+                    remaining--;
+                    if (remaining === 0 && !resolved) resolve(null);
+                });
+        });
+    });
+}
+
+async function getLinks(metadata, host, activeProviderGroups) {
     const results = {};
-    const promises = Object.entries(activeProviders).map(async ([name, func]) => {
+    const promises = Object.entries(activeProviderGroups).map(async ([groupName, tasks]) => {
+        if (groupName === '_kinoukrStandalone') {
+            // kinoukr runs standalone — returns both ashdi and tortuga
+            try {
+                const result = await tasks(metadata, host);
+                if (result && result._routes) {
+                    for (const [key, val] of Object.entries(result._routes)) {
+                        results[key] = val;
+                    }
+                }
+            } catch (e) {
+                console.error(`kinoukr standalone failed:`, e.message);
+            }
+            return;
+        }
         try {
-            const data = await func(metadata, host);
-            if (data && data._routes) {
-                Object.assign(results, data._routes);
+            const result = await raceFirstGroup(tasks, metadata, host);
+            if (!result) return;
+            // Unwrap _routes
+            if (result._routes) {
+                for (const [key, val] of Object.entries(result._routes)) {
+                    results[key] = val;
+                }
             } else {
-                results[name] = data;
+                results[groupName] = result;
             }
         } catch (e) {
-            console.error(`Provider ${name} failed:`, e.message);
-            results[name] = [];
+            console.error(`Provider group ${groupName} failed:`, e.message);
         }
     });
     await Promise.all(promises);
-    return results;
+    return Object.keys(results).length ? results : null;
 }
 
 // === API ROUTES ===
@@ -389,55 +489,46 @@ async function getLinks(metadata, host, activeProviders) {
 app.get('/api/details', async (req, res) => {
     const { id, type } = req.query;
     if (!id || !type) return res.status(400).json({ error: "Missing params" });
-    const cacheKey = `meta_v3_${type}_${id}`;
+    const cacheKey = `meta_v4_${type}_${id}`;
     let metaData = cache.get(cacheKey);
     try {
         if (!metaData) {
             metaData = await getMetadata(id, type);
-            cache.set(cacheKey, metaData, 3600); 
+            cache.set(cacheKey, metaData, 3600);
         }
-        const data = normalizeResponse(metaData, type, '');
-        res.json(data);
+        res.json({
+            id: metaData.id,
+            imdbId: metaData.imdb_id,
+            type: metaData.type,
+            title: metaData.title,
+            originalTitle: metaData.original_title,
+            year: parseInt(metaData.year) || null,
+            posterUrl: metaData.poster_path ? `https://image.tmdb.org/t/p/w500${metaData.poster_path}` : null,
+            backdropUrl: metaData.backdrop_path ? `https://image.tmdb.org/t/p/w1280${metaData.backdrop_path}` : null,
+            overview: metaData.overview,
+            genres: (metaData.genres || []).map(g => g.name),
+            imdbRating: metaData.imdb_rating,
+        });
     } catch (e) { return res.status(500).json({ error: e.message }); }
 });
 
 app.get('/api/get', checkTurnstile, async (req, res) => {
-    const { id, type, sse, eng = 0 } = req.query; 
-    const token = req.headers['cf-turnstile-response'] || req.query.token; 
+    const { id, type, sse, eng = 0 } = req.query;
+    const token = req.headers['cf-turnstile-response'] || req.query.token;
     if (!id || !type) return res.status(400).json({ error: "Missing params" });
     
-    // Вибираємо список провайдерів
     let activeProviders = {};
     const engMode = parseInt(eng);
-
-    if (engMode === 1) {
-        // UA + ENG
-        activeProviders = { ...uaProvidersList, ...engProvidersList };
-    } else if (engMode === 2) {
-        // Only ENG
-        activeProviders = engProvidersList;
-    } else {
-        // Only UA (Default)
-        activeProviders = uaProvidersList;
-    }
-
-    const metaCacheKey = `meta_v3_${type}_${id}`;
-    const fullCacheKey = `full_data_v3_${type}_${id}_eng${engMode}`;
+    if (engMode === 1) activeProviders = { ...providerGroups, ...engProviderGroups };
+    else if (engMode === 2) activeProviders = engProviderGroups;
+    else activeProviders = providerGroups;
     
-    const updateCacheIncrementally = (newDataLinks) => {
-        let currentFullData = cache.get(fullCacheKey);
-        if (!currentFullData) {
-             const meta = cache.get(metaCacheKey);
-             if (meta) {
-                 currentFullData = { ...meta, links: {} };
-             } else {
-                 return; 
-             }
-        }
-        currentFullData.links = { ...currentFullData.links, ...newDataLinks };
-        cache.set(fullCacheKey, currentFullData, 300);
-    };
-
+    // kinoukr runs standalone (returns both ashdi and tortuga routes)
+    activeProviders._kinoukrStandalone = (m, h) => kinoukr.getLinks(m.imdb_id, m.title, m.year);
+    
+    const metaCacheKey = `meta_v4_${type}_${id}`;
+    const fullCacheKey = `links_v5_${type}_${id}_eng${engMode}`;
+    
     if (sse === '1') {
         res.setHeader('Content-Type', 'text/event-stream');
         res.setHeader('Cache-Control', 'no-cache');
@@ -445,63 +536,128 @@ app.get('/api/get', checkTurnstile, async (req, res) => {
         res.setHeader('X-Accel-Buffering', 'no');
         res.flushHeaders();
         if (req.socket) req.socket.setNoDelay(true);
+        
         try {
-            let fullData = cache.get(fullCacheKey);
-            if (fullData) {
-                const initialData = normalizeResponse(fullData, type, token);
-                const cleanMeta = { ...initialData };
-                delete cleanMeta.sources;
-                delete cleanMeta.seasons;
-                res.write(`data: ${JSON.stringify(cleanMeta)}\n\n`);
+            // Check full cache first
+            let cachedLinks = cache.get(fullCacheKey);
+            if (cachedLinks) {
+                const host = `${req.protocol}://${req.get('host')}`;
+                const normalized = normalizeResponse({ ...cachedLinks.meta, links: cachedLinks.links }, type, token, host);
                 
-                if (fullData.links) {
-                    Object.entries(fullData.links).forEach(([providerName, links]) => {
-                         if (links && (Array.isArray(links) ? links.length > 0 : Object.keys(links).length > 0)) {
-                            if (activeProviders[providerName]) {
-                                const chunkMeta = { ...fullData, links: { [providerName]: links } };
-                                const normalizedChunk = normalizeResponse(chunkMeta, type, token);
-                                const payload = { provider: providerName, sources: normalizedChunk.sources, seasons: normalizedChunk.seasons };
-                                res.write(`data: ${JSON.stringify(payload)}\n\n`);
-                            }
-                         }
-                    });
+                // Stream cached providers with delay to simulate progressive loading
+                const providerEntries = Object.entries(normalized.providers);
+                for (let i = 0; i < providerEntries.length; i++) {
+                    const [provName, provData] = providerEntries[i];
+                    const payload = { provider: provName };
+                    if (type === 'movie') payload.sources = provData;
+                    else payload.seasons = provData;
+                    
+                    res.write(`data: ${JSON.stringify(payload)}\n\n`);
+                    if (typeof res.flush === 'function') res.flush();
+                    
+                    // Add small delay between providers (except last one)
+                    if (i < providerEntries.length - 1) {
+                        await new Promise(resolve => setTimeout(resolve, 50));
+                    }
                 }
-                res.write('event: complete\ndata: "done"\n\n');
+                
+                res.write('event: complete\ndata: done\n\n');
                 return res.end();
             }
-
+            
             let metaData = cache.get(metaCacheKey);
             if (!metaData) {
                 metaData = await getMetadata(id, type);
                 cache.set(metaCacheKey, metaData, 3600);
             }
             
-            cache.set(fullCacheKey, { ...metaData, links: {} }, 300);
-
-            const initialData = normalizeResponse(metaData, type, token);
-            res.write(`data: ${JSON.stringify(initialData)}\n\n`);
-            
             const host = `${req.protocol}://${req.get('host')}`;
+            const allLinks = {};
             
-            const promises = Object.entries(activeProviders).map(async ([name, func]) => {
+            // kinoukr runs standalone — returns both ashdi and tortuga routes
+            const kinoukrPromise = activeProviders._kinoukrStandalone
+                ? activeProviders._kinoukrStandalone(metaData, host)
+                : Promise.resolve(null);
+            
+            const promises = Object.entries(activeProviders).map(async ([groupName, tasks]) => {
+                if (groupName === '_kinoukrStandalone') return; // skip, handled separately
                 try {
-                    const links = await func(metaData, host);
-                    if (!links) return;
-                    const routes = (links && links._routes) ? links._routes : { [name]: links };
-                    for (const [routeName, routeLinks] of Object.entries(routes)) {
-                        if (!routeLinks || (Array.isArray(routeLinks) ? routeLinks.length === 0 : Object.keys(routeLinks).length === 0)) continue;
-                        updateCacheIncrementally({ [routeName]: routeLinks });
-                        const chunkMeta = { ...metaData, links: { [routeName]: routeLinks } };
-                        const normalizedChunk = normalizeResponse(chunkMeta, type, token);
-                        const payload = { provider: routeName, sources: normalizedChunk.sources, seasons: normalizedChunk.seasons };
-                        res.write(`data: ${JSON.stringify(payload)}\n\n`);
-                        if (typeof res.flush === 'function') res.flush();
+                    const result = await raceFirstGroup(tasks, metaData, host);
+                    if (!result) return;
+                    
+                    // Unwrap _routes
+                    const unwrapped = result._routes || { [groupName]: result };
+                    
+                    for (const [provName, provLinks] of Object.entries(unwrapped)) {
+                        allLinks[provName] = provLinks;
+                        
+                        // Normalize and send SSE for each provider IMMEDIATELY
+                        const chunkMeta = { ...metaData, links: { [provName]: provLinks } };
+                        const normalized = normalizeResponse(chunkMeta, type, token, host);
+                        const provData = normalized.providers[provName];
+                        if (provData) {
+                            const payload = { provider: provName };
+                            if (type === 'movie') payload.sources = provData;
+                            else payload.seasons = provData;
+                            console.log(`[SSE] Streaming provider: ${provName} at ${new Date().toISOString()}`);
+                            
+                            // CRITICAL: Write and flush immediately to prevent buffering
+                            const written = res.write(`data: ${JSON.stringify(payload)}\n\n`);
+                            console.log(`[SSE] Write result for ${provName}: ${written}`);
+                            
+                            // Force flush if available (compression middleware)
+                            if (typeof res.flush === 'function') {
+                                res.flush();
+                                console.log(`[SSE] Flushed ${provName}`);
+                            }
+                        }
                     }
-                } catch (e) {}
+                } catch (e) {
+                    console.error(`[SSE] Provider group ${groupName} failed:`, e.message);
+                }
             });
             
-            await Promise.all(promises);
-            res.write('event: complete\ndata: "done"\n\n');
+            // Run kinoukr in parallel with other groups
+            const kinoukrTask = (async () => {
+                try {
+                    const kinoukrResult = await kinoukrPromise;
+                    if (kinoukrResult && kinoukrResult._routes) {
+                        for (const [provName, provLinks] of Object.entries(kinoukrResult._routes)) {
+                            allLinks[provName] = provLinks;
+                            
+                            const chunkMeta = { ...metaData, links: { [provName]: provLinks } };
+                            const normalized = normalizeResponse(chunkMeta, type, token, host);
+                            const provData = normalized.providers[provName];
+                            if (provData) {
+                                const payload = { provider: provName };
+                                if (type === 'movie') payload.sources = provData;
+                                else payload.seasons = provData;
+                                console.log(`[SSE] Streaming provider: ${provName} at ${new Date().toISOString()}`);
+                                
+                                // CRITICAL: Write and flush immediately to prevent buffering
+                                const written = res.write(`data: ${JSON.stringify(payload)}\n\n`);
+                                console.log(`[SSE] Write result for ${provName}: ${written}`);
+                                
+                                // Force flush if available (compression middleware)
+                                if (typeof res.flush === 'function') {
+                                    res.flush();
+                                    console.log(`[SSE] Flushed ${provName}`);
+                                }
+                            }
+                        }
+                    }
+                } catch (e) {
+                    console.error('[SSE] kinoukr failed:', e.message);
+                }
+            })();
+            
+            // Wait for all providers to complete
+            await Promise.all([...promises, kinoukrTask]);
+            
+            // Cache the full result
+            cache.set(fullCacheKey, { meta: metaData, links: allLinks }, 3600);
+            
+            res.write('event: complete\ndata: done\n\n');
             return res.end();
         } catch (e) {
             console.error("SSE Error:", e);
@@ -510,10 +666,10 @@ app.get('/api/get', checkTurnstile, async (req, res) => {
         }
     }
     
-    let fullData = cache.get(fullCacheKey);
+    // Non-SSE: batch response
+    let cachedLinks = cache.get(fullCacheKey);
     try {
-        if (!fullData) {
-            const metaCacheKey = `meta_v3_${type}_${id}`;
+        if (!cachedLinks) {
             let metaData = cache.get(metaCacheKey);
             if (!metaData) {
                 metaData = await getMetadata(id, type);
@@ -521,11 +677,12 @@ app.get('/api/get', checkTurnstile, async (req, res) => {
             }
             const host = `${req.protocol}://${req.get('host')}`;
             const links = await getLinks(metaData, host, activeProviders);
-            fullData = { ...metaData, links };
-            cache.set(fullCacheKey, fullData, 300);
+            cachedLinks = { meta: metaData, links };
+            cache.set(fullCacheKey, cachedLinks, 3600);
         }
-        const data = normalizeResponse(fullData, type, token);
-        res.json(data);
+        const host = `${req.protocol}://${req.get('host')}`;
+        const normalized = normalizeResponse({ ...cachedLinks.meta, links: cachedLinks.links }, type, token, host);
+        res.json(normalized);
     } catch (e) { return res.status(500).json({ error: e.message }); }
 });
 
@@ -538,81 +695,102 @@ app.get('/embed', checkTurnstile, async (req, res) => {
     const engMode = parseInt(eng);
 
     if (engMode === 1) {
-        activeProviders = { ...uaProvidersList, ...engProvidersList };
+        activeProviders = { ...providerGroups, ...engProviderGroups };
     } else if (engMode === 2) {
-        activeProviders = engProvidersList;
+        activeProviders = engProviderGroups;
     } else {
-        activeProviders = uaProvidersList;
+        activeProviders = providerGroups;
     }
-
-    const fullCacheKey = `full_data_v3_${type}_${id}_eng${engMode}`;
-    let fullData = cache.get(fullCacheKey);
     
-    if (!fullData) {
-        const metaCacheKey = `meta_v3_${type}_${id}`;
+    activeProviders._kinoukrStandalone = (m, h) => kinoukr.getLinks(m.imdb_id, m.title, m.year);
+
+    const fullCacheKey = `links_v5_${type}_${id}_eng${engMode}`;
+    let cachedLinks = cache.get(fullCacheKey);
+    const embedHost = `${req.protocol}://${req.get('host')}`;
+    
+    if (!cachedLinks) {
+        const metaCacheKey = `meta_v4_${type}_${id}`;
         let metaData = cache.get(metaCacheKey);
         if (!metaData) {
             metaData = await getMetadata(id, type);
             cache.set(metaCacheKey, metaData, 3600);
         }
-        const host = `${req.protocol}://${req.get('host')}`;
-        const links = await getLinks(metaData, host, activeProviders);
-        fullData = { ...metaData, links };
-        cache.set(fullCacheKey, fullData, 300);
+        const links = await getLinks(metaData, embedHost, activeProviders);
+        cachedLinks = { meta: metaData, links };
+        cache.set(fullCacheKey, cachedLinks, 3600);
     }
     
-    const data = normalizeResponse(fullData, type, turnstileToken);
+    const fullData = cachedLinks.meta;
+    const normalized = normalizeResponse({ ...cachedLinks.meta, links: cachedLinks.links }, type, turnstileToken, embedHost);
     
     const playlist = [];
     if (type === 'movie') {
-        let sources = data.sources || [];
-        if (source) { 
-            const filtered = sources.filter(src => src.provider === source); 
-            if (filtered.length > 0) sources = filtered; 
+        // Get sources from all providers or filtered by source param
+        let allSources = [];
+        for (const [provName, sources] of Object.entries(normalized.providers)) {
+            if (source && provName !== source) continue;
+            (sources || []).forEach(s => allSources.push({ ...s, provider: provName, dub: s.title || 'Original' }));
+        }
+        if (!source && allSources.length === 0) {
+            // Try all providers
+            for (const sources of Object.values(normalized.providers)) {
+                (sources || []).forEach(s => allSources.push({ ...s, dub: s.title || 'Original' }));
+            }
         }
         
-        if (sources.length > 0) {
-            const bestSource = sources[0];
-            let posterUrl = bestSource.poster;
-            if (!posterUrl && data.poster_path) posterUrl = `https://image.tmdb.org/t/p/w1280${data.poster_path}`;
-            playlist.push({ 
-                name: data.title, 
-                poster: posterUrl || '', 
-                sources: [{ src: bestSource.url, type: bestSource.type, subtitles: bestSource.subtitles }], 
-                meta: { season: 0, episode: 0, allSources: sources } 
+        if (allSources.length > 0) {
+            const best = allSources[0];
+            let posterUrl = best.poster;
+            if (!posterUrl && fullData.poster_path) posterUrl = `https://image.tmdb.org/t/p/w1280${fullData.poster_path}`;
+            playlist.push({
+                name: fullData.title || 'Movie',
+                poster: posterUrl || '',
+                sources: [{ src: best.url, type: best.mime || best.type, subtitles: best.subtitles }],
+                meta: { season: 0, episode: 0, allSources }
             });
         }
     } else {
-        if (data.seasons) {
-            data.seasons.forEach(s => {
-                s.episodes.forEach(e => {
-                    let epSources = e.sources;
-                    if (source) { 
-                        const filtered = epSources.filter(src => src.provider === source); 
-                        if (filtered.length > 0) epSources = filtered; 
-                    }
-                    
-                    if (epSources.length > 0) {
-                        const bestSource = epSources[0];
-                        let posterUrl = bestSource.poster || e.poster;
-                        if (!posterUrl && data.poster_path) posterUrl = `https://image.tmdb.org/t/p/w1280${data.poster_path}`;
-                        else if (posterUrl && posterUrl.startsWith('/')) posterUrl = `https://image.tmdb.org/t/p/w1280${posterUrl}`;
-                        
-                        playlist.push({ 
-                            name: `S${s.number} E${e.episode}`, 
-                            sources: [{ src: bestSource.url, type: bestSource.type, subtitles: bestSource.subtitles }], 
-                            poster: posterUrl || '', 
-                            meta: { season: s.number, episode: e.episode, allSources: epSources } 
-                        });
-                    }
+        // TV: iterate providers → seasons → episodes
+        const episodeMap = {};  // "S1E1" → { sources: [], poster }
+        
+        for (const [provName, seasons] of Object.entries(normalized.providers)) {
+            if (source && provName !== source) continue;
+            if (!seasons || typeof seasons !== 'object') continue;
+            
+            for (const [sNum, episodes] of Object.entries(seasons)) {
+                for (const [eNum, sources] of Object.entries(episodes)) {
+                    const key = `S${sNum}E${eNum}`;
+                    if (!episodeMap[key]) episodeMap[key] = { season: parseInt(sNum), episode: parseInt(eNum), sources: [] };
+                    sources.forEach(s => episodeMap[key].sources.push({ ...s, provider: provName, dub: s.title || 'Original' }));
+                }
+            }
+        }
+        
+        const sortedEps = Object.values(episodeMap).sort((a, b) => {
+            if (a.season !== b.season) return a.season - b.season;
+            return a.episode - b.episode;
+        });
+        
+        for (const ep of sortedEps) {
+            if (ep.sources.length > 0) {
+                const best = ep.sources[0];
+                let posterUrl = best.poster;
+                if (!posterUrl && fullData.poster_path) posterUrl = `https://image.tmdb.org/t/p/w1280${fullData.poster_path}`;
+                else if (posterUrl && posterUrl.startsWith('/')) posterUrl = `https://image.tmdb.org/t/p/w1280${posterUrl}`;
+                
+                playlist.push({
+                    name: `S${ep.season} E${ep.episode}`,
+                    sources: [{ src: best.url, type: best.mime || best.type, subtitles: best.subtitles }],
+                    poster: posterUrl || '',
+                    meta: { season: ep.season, episode: ep.episode, allSources: ep.sources }
                 });
-            });
+            }
         }
     }
     
     if (playlist.length === 0) return res.status(404).send('No content found for selected source');
     // HTML шаблон...
-    res.send(`<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>${data.title}</title><link href="/static/videojs/video-js.css" rel="stylesheet" /><link href="https://fonts.googleapis.com/icon?family=Material+Icons" rel="stylesheet"><link href="/static/mobile-ui/videojs-mobile-ui.css" rel="stylesheet" /><link href="/player-style.css" rel="stylesheet" /></head><body><div class="player-wrapper"><video id="my-video" class="video-js" controls preload="metadata" crossorigin="anonymous"><p class="vjs-no-js">Enable JS</p></video><div id="player-header"><div class="header-controls"><select id="season-select" class="ep-select" style="display:none"></select><select id="episode-select" class="ep-select" style="display:none"></select></div></div><div id="settings-menu" class="settings-menu"><div id="main-menu"><div class="settings-item" onclick="openSubmenu('quality')"><div class="settings-label"><span class="material-icons">hd</span> Якість</div><div class="settings-value" id="val-quality">Auto</div></div><div class="settings-item" onclick="openSubmenu('audio')"><div class="settings-label"><span class="material-icons">mic</span> Озвучка</div><div class="settings-value" id="val-audio">Default</div></div><div class="settings-item" onclick="openSubmenu('speed')"><div class="settings-label"><span class="material-icons">speed</span> Швидкість</div><div class="settings-value" id="val-speed">Звичайна</div></div><div class="settings-item" onclick="openSubmenu('subs')"><div class="settings-label"><span class="material-icons">subtitles</span> Субтитри</div><div class="settings-value" id="val-subs">Вимк</div></div></div><div id="submenu-quality" class="settings-submenu"><div class="submenu-header" onclick="closeSubmenu()"><span class="material-icons">arrow_back</span> Якість</div><div class="submenu-scroll" id="quality-options"></div></div><div id="submenu-audio" class="settings-submenu"><div class="submenu-header" onclick="closeSubmenu()"><span class="material-icons">arrow_back</span> Озвучка</div><div class="submenu-scroll" id="audio-options"></div></div><div id="submenu-speed" class="settings-submenu"><div class="submenu-header" onclick="closeSubmenu()"><span class="material-icons">arrow_back</span> Швидкість</div><div class="submenu-option selected" onclick="setSpeed(1)" data-speed="1">Звичайна</div><div class="submenu-option" onclick="setSpeed(1.25)" data-speed="1.25">1.25x</div><div class="submenu-option" onclick="setSpeed(1.5)" data-speed="1.5">1.5x</div><div class="submenu-option" onclick="setSpeed(2)" data-speed="2">2x</div></div><div id="submenu-subs" class="settings-submenu"><div class="submenu-header" onclick="closeSubmenu()"><span class="material-icons">arrow_back</span> Субтитри</div><div class="submenu-scroll" id="subs-options"></div></div></div></div><script src="/static/videojs/video.min.js"></script><script src="/static/quality-levels/videojs-contrib-quality-levels.min.js"></script><script src="/static/hotkeys/videojs.hotkeys.min.js"></script><script src="/static/playlist/videojs-playlist.min.js"></script><script src="/static/mobile-ui/videojs-mobile-ui.min.js"></script>
+    res.send(`<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>${fullData.title}</title><link href="/static/videojs/video-js.css" rel="stylesheet" /><link href="https://fonts.googleapis.com/icon?family=Material+Icons" rel="stylesheet"><link href="/static/mobile-ui/videojs-mobile-ui.css" rel="stylesheet" /><link href="/player-style.css" rel="stylesheet" /></head><body><div class="player-wrapper"><video id="my-video" class="video-js" controls preload="metadata" crossorigin="anonymous"><p class="vjs-no-js">Enable JS</p></video><div id="player-header"><div class="header-controls"><select id="season-select" class="ep-select" style="display:none"></select><select id="episode-select" class="ep-select" style="display:none"></select></div></div><div id="settings-menu" class="settings-menu"><div id="main-menu"><div class="settings-item" onclick="openSubmenu('quality')"><div class="settings-label"><span class="material-icons">hd</span> Якість</div><div class="settings-value" id="val-quality">Auto</div></div><div class="settings-item" onclick="openSubmenu('audio')"><div class="settings-label"><span class="material-icons">mic</span> Озвучка</div><div class="settings-value" id="val-audio">Default</div></div><div class="settings-item" onclick="openSubmenu('speed')"><div class="settings-label"><span class="material-icons">speed</span> Швидкість</div><div class="settings-value" id="val-speed">Звичайна</div></div><div class="settings-item" onclick="openSubmenu('subs')"><div class="settings-label"><span class="material-icons">subtitles</span> Субтитри</div><div class="settings-value" id="val-subs">Вимк</div></div></div><div id="submenu-quality" class="settings-submenu"><div class="submenu-header" onclick="closeSubmenu()"><span class="material-icons">arrow_back</span> Якість</div><div class="submenu-scroll" id="quality-options"></div></div><div id="submenu-audio" class="settings-submenu"><div class="submenu-header" onclick="closeSubmenu()"><span class="material-icons">arrow_back</span> Озвучка</div><div class="submenu-scroll" id="audio-options"></div></div><div id="submenu-speed" class="settings-submenu"><div class="submenu-header" onclick="closeSubmenu()"><span class="material-icons">arrow_back</span> Швидкість</div><div class="submenu-option selected" onclick="setSpeed(1)" data-speed="1">Звичайна</div><div class="submenu-option" onclick="setSpeed(1.25)" data-speed="1.25">1.25x</div><div class="submenu-option" onclick="setSpeed(1.5)" data-speed="1.5">1.5x</div><div class="submenu-option" onclick="setSpeed(2)" data-speed="2">2x</div></div><div id="submenu-subs" class="settings-submenu"><div class="submenu-header" onclick="closeSubmenu()"><span class="material-icons">arrow_back</span> Субтитри</div><div class="submenu-scroll" id="subs-options"></div></div></div></div><script src="/static/videojs/video.min.js"></script><script src="/static/quality-levels/videojs-contrib-quality-levels.min.js"></script><script src="/static/hotkeys/videojs.hotkeys.min.js"></script><script src="/static/playlist/videojs-playlist.min.js"></script><script src="/static/mobile-ui/videojs-mobile-ui.min.js"></script>
     <script>
         const cfToken = "${turnstileToken}";
         const myOrigin = window.location.origin;
@@ -660,6 +838,38 @@ app.get('/embed', checkTurnstile, async (req, res) => {
         window.rawPlaylist = rawPlaylist;
     </script>
     <script src="/player-script.js"></script></body></html>`);
+});
+
+// Tortuga HLS proxy — rewrites all calypso.tortuga.tw URLs through cors.bwa.workers.dev
+app.get('/api/tortuga/proxy/master.m3u8', async (req, res) => {
+    const url = req.query.url;
+    if (!url || !url.startsWith('https://calypso.tortuga.tw/')) {
+        return res.status(400).send('Invalid url');
+    }
+    
+    try {
+        const proxyUrl = `https://cors.bwa.workers.dev/${url}`;
+        const response = await axios.get(proxyUrl, {
+            headers: { 'Referer': 'https://tortuga.tw/', 'Accept': '*/*' },
+            timeout: 15000,
+            responseType: 'text'
+        });
+        
+        // Rewrite all absolute tortuga URLs to go through cors proxy
+        const rewritten = response.data.split('\n').map(line => {
+            const trimmed = line.trim();
+            if (!trimmed || trimmed.startsWith('#')) return line;
+            // Replace absolute tortuga URLs with cors proxy version
+            return trimmed.replace(/https:\/\/calypso\.tortuga\.tw\//g, 'https://cors.bwa.workers.dev/https://calypso.tortuga.tw/');
+        }).join('\n');
+        
+        res.set('Content-Type', 'application/vnd.apple.mpegurl');
+        res.set('Access-Control-Allow-Origin', '*');
+        res.send(rewritten);
+    } catch (e) {
+        console.error('[Tortuga Proxy] Error:', e.message);
+        res.status(502).send('Proxy error');
+    }
 });
 
 // Решта роутів без змін...

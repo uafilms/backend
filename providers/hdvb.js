@@ -1,67 +1,116 @@
 const axios = require('axios');
-const cheerio = require('cheerio');
 const proxyManager = require('../utils/proxyManager');
 
-module.exports = {
-    getLinks: async (title, year) => {
-        const axiosConfig = proxyManager.getConfig('hdvb');
-        try {
-            const searchRes = await axios.post('https://eneyida.tv/index.php?do=search', 
-                `do=search&subaction=search&story=${encodeURIComponent(title)}`,
-                { 
-                    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-                    ...axiosConfig
+/**
+ * Parse HDVB iframe content to extract file URL(s), poster, subtitle.
+ * Handles both simple file URLs and complex nested JSON arrays (for TV series).
+ * Used by any site that embeds HDVB players (eneyida.tv, uaserials.my, etc.)
+ */
+async function parseHdvbIframe(iframeSrc, referer) {
+    const axiosConfig = proxyManager.getConfig('hdvb');
+    try {
+        const { data: html } = await axios.get(iframeSrc, {
+            headers: { 'Referer': referer || '' },
+            ...axiosConfig,
+            timeout: 15000
+        });
+        if (!html || typeof html !== 'string') return null;
+
+        // Match file value - could be JSON array/object (with or without quotes), or a URL
+        // New HDVB format: file: [{...}]  (no quotes)
+        // Old format: file: '[{...}]' or file: 'https://...'
+        
+        // Find the file: keyword position
+        const filePos = html.search(/file\s*:\s*/);
+        if (filePos === -1) return null;
+        
+        // Get content after file:
+        const afterFile = html.substring(filePos + html.match(/file\s*:\s*/)[0].length);
+        let fileValue = null;
+        
+        if (afterFile.startsWith('[') || afterFile.startsWith('{')) {
+            // JSON structure - use bracket counting
+            const openChar = afterFile[0];
+            const closeChar = openChar === '[' ? ']' : '}';
+            let depth = 0;
+            let inString = false;
+            let escaped = false;
+            
+            for (let i = 0; i < afterFile.length; i++) {
+                const ch = afterFile[i];
+                if (escaped) { escaped = false; continue; }
+                if (ch === '\\') { escaped = true; continue; }
+                if (ch === '"' && !escaped) { inString = !inString; continue; }
+                if (!inString) {
+                    if (ch === openChar) depth++;
+                    if (ch === closeChar) {
+                        depth--;
+                        if (depth === 0) {
+                            fileValue = afterFile.substring(0, i + 1);
+                            break;
+                        }
+                    }
                 }
-            );
+            }
+        } else if (afterFile.startsWith("'") || afterFile.startsWith('"')) {
+            // Quoted string
+            const quote = afterFile[0];
+            const endQuote = afterFile.indexOf(quote, 1);
+            if (endQuote > 0) fileValue = afterFile.substring(1, endQuote);
+        }
+        
+        if (!fileValue) return null;
 
-            const $ = cheerio.load(searchRes.data);
-            let movieLink = null;
+        // Try to parse as JSON
+        if (fileValue.startsWith('[') || fileValue.startsWith('{')) {
+            const openChar = fileValue[0];
+            const closeChar = openChar === '[' ? ']' : '}';
+            let depth = 0;
+            let inString = false;
+            let escaped = false;
 
-            // Більш точний пошук за допомогою cheerio
-            $('article').each((i, el) => {
-                const link = $(el).find('a').attr('href');
-                const titleText = $(el).find('.short-title, h2, a').text().toLowerCase();
-                const textContent = $(el).text();
-                
-                // Перевіряємо, чи є рік у тексті (обмежений не-цифрами, щоб 2023 не знайшло в 202)
-                const yearRegex = new RegExp(`(?<!\\d)${year}(?!\\d)`);
-                const hasYear = yearRegex.test(textContent);
-                
-                // Перевіряємо входження назви
-                const hasTitle = titleText.includes(title.toLowerCase());
-
-                if (link && hasYear && hasTitle) {
-                    movieLink = link;
-                    return false; // break loop
+            for (let i = 0; i < fileValue.length; i++) {
+                const ch = fileValue[i];
+                if (escaped) { escaped = false; continue; }
+                if (ch === '\\') { escaped = true; continue; }
+                if (ch === '"' && !escaped) { inString = !inString; continue; }
+                if (!inString) {
+                    if (ch === openChar) depth++;
+                    if (ch === closeChar) {
+                        depth--;
+                        if (depth === 0) {
+                            fileValue = fileValue.substring(0, i + 1);
+                            break;
+                        }
+                    }
                 }
-            });
+            }
 
-            if (!movieLink) return null;
+            try {
+                const parsed = JSON.parse(fileValue);
+                // Filter out invalid items
+                const valid = Array.isArray(parsed)
+                    ? parsed.filter(item => item && (item.file || item.folder))
+                    : (parsed.file || parsed.folder ? parsed : null);
+                return valid;
+            } catch { /* fall through */ }
+        }
 
-            const moviePage = await axios.get(movieLink, axiosConfig);
-            const iframeSrc = moviePage.data.match(/src="(https?:\/\/[^\/]+\/[^\"]+\/[0-9]+)"/)?.[1];
-            if (!iframeSrc) return null;
-
-            const content = await axios.get(iframeSrc, { 
-                headers: { 'Referer': 'https://eneyida.tv/' },
-                ...axiosConfig 
-            });
-            const html = content.data;
+        // Simple URL
+        if (fileValue && fileValue.startsWith('http')) {
             const getParam = (p) => (html.match(new RegExp(`${p}:\\s?['"]([^'"]+)['"]`)) || [])[1] || null;
-
-            const fileMatch = html.match(/file:\s?['"](\[[\s\S]*?\]|http[^'"]+)['"]/);
-            if (!fileMatch) return null;
-
-            if (fileMatch[1].startsWith('[')) return JSON.parse(fileMatch[1]);
-
             return {
-                file: fileMatch[1],
+                file: fileValue,
                 poster: getParam('poster'),
                 subtitle: getParam('subtitle')
             };
-        } catch (e) { 
-            console.error("HDVB Error:", e.message);
-            return null; 
         }
+
+        return null;
+    } catch (e) {
+        console.error('[HDVB] parseHdvbIframe error:', e.message);
+        return null;
     }
-};
+}
+
+module.exports = { parseHdvbIframe };

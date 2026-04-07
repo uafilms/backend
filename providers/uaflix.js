@@ -9,86 +9,7 @@ const HEADERS = {
     'Referer': BASE_URL
 };
 
-// --- Ashdi Helper Logic ---
-const ASHDI_PROXY_HOST = 'ashdi.aartzz.pp.ua';
-
-function getAshdiProxyUrl(url) {
-    if (!url) return '';
-    const cleanUrl = url.split('?')[0];
-    return cleanUrl.replace('ashdi.vip', ASHDI_PROXY_HOST);
-}
-
-async function parseAshdiPlaylist(iframeUrl) {
-    try {
-        const proxyUrl = getAshdiProxyUrl(iframeUrl);
-        console.log(`[UAFlix] Ashdi Request: ${proxyUrl}`);
-        
-        const headers = {
-            'User-Agent': HEADERS['User-Agent'],
-            'Referer': 'https://ashdi.vip/',
-            'Origin': 'https://ashdi.vip'
-        };
-
-        const response = await axios.get(proxyUrl, { headers });
-        const html = response.data;
-
-        // ВАЖЛИВО: Оновлений regex для багаторядкового JSON
-        const fileMatch = html.match(/file:\s*'(\[\s*\{[\s\S]+?\}\s*\])'/);
-        
-        if (!fileMatch) {
-            console.log('[UAFlix] Ashdi JSON not found in iframe via regex');
-            const simpleMatch = html.match(/file:\s*'(\[.+?\])'/s);
-            if (!simpleMatch) return null;
-            
-            try {
-                let jsonStr = simpleMatch[1].replace(/\\'/g, "'").replace(/\\"/g, '"');
-                const playlistData = JSON.parse(jsonStr);
-                return processAshdiJson(playlistData);
-            } catch (e) {
-                console.log('[UAFlix] JSON Parse error (fallback):', e.message);
-                return null;
-            }
-        }
-
-        let jsonStr = fileMatch[1].replace(/\\'/g, "'").replace(/\\"/g, '"');
-        const playlistData = JSON.parse(jsonStr);
-        return processAshdiJson(playlistData);
-
-    } catch (e) {
-        console.error('Ashdi Parse Error:', e.message);
-        return null;
-    }
-}
-
-function processAshdiJson(playlistData) {
-    const resultPlaylist = [];
-
-    playlistData.forEach(voice => {
-        const voiceName = (voice.title || 'Original').trim();
-        if (voice.folder) {
-            voice.folder.forEach(seasonObj => {
-                const seasonMatch = seasonObj.title.match(/(\d+)/);
-                const seasonNum = seasonMatch ? parseInt(seasonMatch[1]) : 1;
-                if (seasonObj.folder) {
-                    seasonObj.folder.forEach(epObj => {
-                        const epMatch = epObj.title.match(/(\d+)/);
-                        const epNum = epMatch ? parseInt(epMatch[1]) : 1;
-                        resultPlaylist.push({
-                            season: seasonNum,
-                            episode: epNum,
-                            title: epObj.title,
-                            file: epObj.file,
-                            voice: voiceName,
-                            subtitle: epObj.subtitle || null,
-                            provider: 'Ashdi' // Це поле може бути використане агрегатором
-                        });
-                    });
-                }
-            });
-        }
-    });
-    return resultPlaylist;
-}
+const { getLinksFromAshdiUrl } = require('./ashdi');
 
 const normalizeTitle = (str) => {
     if (!str) return '';
@@ -305,7 +226,7 @@ module.exports = {
                                 if (iframeSrc.includes('ashdi.vip/serial/')) {
                                     console.log(`[UAFlix] Handling Ashdi Serial direct parse...`);
                                     const cleanIframeUrl = iframeSrc.split('?')[0];
-                                    const parsedEpisodes = await parseAshdiPlaylist(cleanIframeUrl);
+                                    const parsedEpisodes = await getLinksFromAshdiUrl(cleanIframeUrl, title || targetUa);
                                     
                                     if (parsedEpisodes && parsedEpisodes.length > 0) {
                                         const voicesMap = {};
