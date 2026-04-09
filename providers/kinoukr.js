@@ -167,9 +167,9 @@ module.exports = {
             for (const vod of vods) {
                 if (/ashdi/i.test(vod.url)) {
                     try {
-                        const parsed = await getLinksFromAshdiUrl(vod.url, title || vod.label, undefined, poster);
+                        const parsed = await getLinksFromAshdiUrl(vod.url, title || vod.label);
                         if (parsed && Array.isArray(parsed) && parsed.length) {
-                            // Poster already handled by ashdi parser with fallback
+                            // Let poster come from VOD source; TMDB backdrop used as fallback in embed
                             ashdiLinks.push(...parsed);
                         }
                     } catch (e) {
@@ -195,7 +195,7 @@ module.exports = {
                                     ...ep,
                                     folder: (ep.folder || []).map(dub => ({
                                         ...dub,
-                                        poster: dub.poster || poster
+                                        poster: dub.poster || null
                                     }))
                                 }))
                             })));
@@ -206,7 +206,7 @@ module.exports = {
                             tortugaLinks.push({ 
                                 title: vod.label || 'Tortuga', 
                                 file: vodData.file, 
-                                poster: vodData.poster || poster // Tortuga poster or fallback to kinoukr poster
+                                poster: vodData.poster || null // Let TMDB backdrop handle fallback
                             });
                         }
                     }
