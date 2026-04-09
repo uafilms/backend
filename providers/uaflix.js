@@ -101,13 +101,13 @@ module.exports = {
 
                         if (isAshdi) {
                             console.log(`[UAFlix] Handling Ashdi Movie direct parse: ${player.src}`);
-                            const ashdiLinks = await getLinksFromAshdiUrl(player.src, title || targetUa, null, fullPosterUrl);
+                            const ashdiLinks = await getLinksFromAshdiUrl(player.src, title || targetUa);
                             if (ashdiLinks && ashdiLinks.length > 0) {
                                 ashdiLinks.forEach(link => {
                                     ashdiResults.push({
                                         title: link.title || providerName,
                                         file: link.file,
-                                        poster: link.poster || fullPosterUrl,
+                                        poster: link.poster || null,
                                         subtitle: link.subtitle
                                     });
                                 });
@@ -118,11 +118,15 @@ module.exports = {
                         let m3u8Link = "";
                         let subtitlesArr = [];
 
-                        const iframeRes = await axios.get(player.src, { 
+                        const iframeRes = await axios.get(player.src, {
                             headers: { ...HEADERS, 'Referer': contentUrl },
-                            ...axiosConfig 
+                            ...axiosConfig
                         });
                         const iframeHtml = iframeRes.data;
+
+                        // Extract poster from VOD player (zetvideo etc.)
+                        const vodPosterMatch = iframeHtml.match(/poster\s*:\s*["']([^"']+)["']/);
+                        const vodPoster = vodPosterMatch ? vodPosterMatch[1] : null;
 
                         const fileMatch = iframeHtml.match(/file:\s?["']([^"']+\.m3u8)["']/);
                         if (fileMatch) m3u8Link = fileMatch[1];
@@ -149,7 +153,7 @@ module.exports = {
                             const item = {
                                 title: providerName,
                                 file: proxyLink,
-                                poster: fullPosterUrl,
+                                poster: vodPoster || null,
                                 subtitle: subtitlesArr.length > 0 ? subtitlesArr : null,
                             };
                             if (isAshdi) ashdiResults.push(item);
@@ -321,7 +325,7 @@ module.exports = {
                                 finalResult.push({
                                     title: tabName,
                                     file: proxyLink,
-                                    poster: fullPosterUrl
+                                    poster: null
                                 });
                             }
                         } catch (iframeErr) {
@@ -403,6 +407,45 @@ module.exports = {
                                 const isAshdiTab = iframeSrc.includes('ashdi.vip') || tabName.toLowerCase().includes('ashdi');
                                 let providerName = tabName;
 
+                                // Try to extract VOD posters from iframe (zetvideo etc.)
+                                let vodPosters = {};
+                                try {
+                                    const iframeRes = await axios.get(iframeSrc, {
+                                        headers: { ...HEADERS, 'Referer': firstEpisodeUrl },
+                                        ...axiosConfig
+                                    });
+                                    const iframeHtml = iframeRes.data;
+                                    const vodPosterMatch = iframeHtml.match(/poster\s*:\s*["']([^"']+)["']/);
+                                    if (vodPosterMatch) {
+                                        // Single poster for all episodes
+                                        vodPosters._global = vodPosterMatch[1];
+                                    }
+                                    // Also try JSON playlist for per-episode posters
+                                    const fileMatch = iframeHtml.match(/file\s*:\s*'(\[[\s\S]*?\])'\s*[,}]/);
+                                    if (fileMatch) {
+                                        try {
+                                            const playlist = JSON.parse(fileMatch[1]);
+                                            if (Array.isArray(playlist)) {
+                                                for (const voice of playlist) {
+                                                    const seasons = Array.isArray(voice.folder) ? voice.folder : [];
+                                                    for (const season of seasons) {
+                                                        const sMatch = (season.title || '').match(/(\d+)/);
+                                                        const sNum = sMatch ? parseInt(sMatch[1]) : 1;
+                                                        const episodes = Array.isArray(season.folder) ? season.folder : [];
+                                                        episodes.forEach((ep, ei) => {
+                                                            const eMatch = (ep.title || '').match(/(\d+)/);
+                                                            const eNum = eMatch ? parseInt(eMatch[1]) : ei + 1;
+                                                            if (ep.poster) vodPosters[`${sNum}_${eNum}`] = ep.poster;
+                                                        });
+                                                    }
+                                                }
+                                            }
+                                        } catch(e) {}
+                                    }
+                                } catch(e) {
+                                    console.log(`[UAFlix] Could not fetch VOD posters from iframe: ${e.message}`);
+                                }
+
                                 const seasons = Object.keys(episodesMap).sort((a, b) => a - b);
                                 const playlist = seasons.map(seasonNum => {
                                     const episodes = episodesMap[seasonNum]
@@ -410,7 +453,7 @@ module.exports = {
                                         .map(ep => ({
                                             title: ep.title,
                                             file: `${host}/api/uaflix/stream/master.m3u8?url=${encodeURIComponent(ep.pageUrl)}&player=${i}`,
-                                            poster: ep.poster,
+                                            poster: vodPosters[`${ep.season}_${ep.episode}`] || vodPosters._global || ep.poster,
                                             season: ep.season,
                                             episode: ep.episode
                                         }));
@@ -456,6 +499,42 @@ module.exports = {
                             } else if (iframeSrc) {
                                 const isAshdiSingle = iframeSrc.includes('ashdi');
                                 const providerName = 'Основний';
+
+                                // Try to extract VOD posters from iframe
+                                let vodPosters = {};
+                                try {
+                                    const iframeRes = await axios.get(iframeSrc, {
+                                        headers: { ...HEADERS, 'Referer': firstEpisodeUrl },
+                                        ...axiosConfig
+                                    });
+                                    const iframeHtml = iframeRes.data;
+                                    const vodPosterMatch = iframeHtml.match(/poster\s*:\s*["']([^"']+)["']/);
+                                    if (vodPosterMatch) vodPosters._global = vodPosterMatch[1];
+                                    const fileMatch = iframeHtml.match(/file\s*:\s*'(\[[\s\S]*?\])'\s*[,}]/);
+                                    if (fileMatch) {
+                                        try {
+                                            const pl = JSON.parse(fileMatch[1]);
+                                            if (Array.isArray(pl)) {
+                                                for (const voice of pl) {
+                                                    const szns = Array.isArray(voice.folder) ? voice.folder : [];
+                                                    for (const season of szns) {
+                                                        const sMatch = (season.title || '').match(/(\d+)/);
+                                                        const sNum = sMatch ? parseInt(sMatch[1]) : 1;
+                                                        const episodes = Array.isArray(season.folder) ? season.folder : [];
+                                                        episodes.forEach((ep, ei) => {
+                                                            const eMatch = (ep.title || '').match(/(\d+)/);
+                                                            const eNum = eMatch ? parseInt(eMatch[1]) : ei + 1;
+                                                            if (ep.poster) vodPosters[`${sNum}_${eNum}`] = ep.poster;
+                                                        });
+                                                    }
+                                                }
+                                            }
+                                        } catch(e) {}
+                                    }
+                                } catch(e) {
+                                    console.log(`[UAFlix] Could not fetch VOD posters from single iframe: ${e.message}`);
+                                }
+
                                 const seasons = Object.keys(episodesMap).sort((a, b) => a - b);
                                 const playlist = seasons.map(seasonNum => {
                                     const episodes = episodesMap[seasonNum]
@@ -463,7 +542,7 @@ module.exports = {
                                         .map(ep => ({
                                             title: ep.title,
                                             file: `${host}/api/uaflix/stream/master.m3u8?url=${encodeURIComponent(ep.pageUrl)}&player=0`,
-                                            poster: ep.poster,
+                                            poster: vodPosters[`${ep.season}_${ep.episode}`] || vodPosters._global || ep.poster,
                                             season: ep.season,
                                             episode: ep.episode
                                         }));
