@@ -744,7 +744,8 @@ app.get('/embed', checkTurnstile, async (req, res) => {
         if (allSources.length > 0) {
             const best = allSources[0];
             let posterUrl = best.poster;
-            if (!posterUrl && fullData.poster_path) posterUrl = `https://image.tmdb.org/t/p/w1280${fullData.poster_path}`;
+            if (!posterUrl && fullData.backdrop_path) posterUrl = `https://image.tmdb.org/t/p/w1280${fullData.backdrop_path}`;
+            else if (!posterUrl && fullData.poster_path) posterUrl = `https://image.tmdb.org/t/p/w1280${fullData.poster_path}`;
             playlist.push({
                 name: fullData.title || 'Movie',
                 poster: posterUrl || '',
@@ -778,7 +779,8 @@ app.get('/embed', checkTurnstile, async (req, res) => {
             if (ep.sources.length > 0) {
                 const best = ep.sources[0];
                 let posterUrl = best.poster;
-                if (!posterUrl && fullData.poster_path) posterUrl = `https://image.tmdb.org/t/p/w1280${fullData.poster_path}`;
+                if (!posterUrl && fullData.backdrop_path) posterUrl = `https://image.tmdb.org/t/p/w1280${fullData.backdrop_path}`;
+                else if (!posterUrl && fullData.poster_path) posterUrl = `https://image.tmdb.org/t/p/w1280${fullData.poster_path}`;
                 else if (posterUrl && posterUrl.startsWith('/')) posterUrl = `https://image.tmdb.org/t/p/w1280${posterUrl}`;
                 
                 playlist.push({
