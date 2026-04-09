@@ -424,13 +424,31 @@ document.addEventListener('DOMContentLoaded', function () {
 
         if (!isRestoring) {
           if (meta && meta.allSources && meta.allSources.length > 0) {
+            // Try to find same dub/provider in the new episode
             let activeSource = meta.allSources.find(s => s.dub === currentDub && s.provider === currentProvider);
-            if (!activeSource) activeSource = meta.allSources[0];
+            
+            // If not found exactly, try matching just the dub
+            if (!activeSource) {
+              activeSource = meta.allSources.find(s => s.dub === currentDub);
+            }
+
+            // Fallback to first available if absolutely not found
+            if (!activeSource) {
+              activeSource = meta.allSources[0];
+            }
 
             if (activeSource) {
               currentDub = activeSource.dub || 'Original';
               currentProvider = activeSource.provider;
               syncTracks(player, activeSource);
+              
+              // Apply the source if it's different from what's currently playing
+              // (unless it's already being handled by webm logic above)
+              const cur = player.currentSrc();
+              if (!sameUrl(cur, activeSource.url)) {
+                player.src({ src: activeSource.url, type: activeSource.type });
+                if (activeSource.poster) player.poster(activeSource.poster);
+              }
             }
           }
         }

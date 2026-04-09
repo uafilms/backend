@@ -99,6 +99,22 @@ module.exports = {
                         const isAshdi = player.src.includes('ashdi.vip') || player.name.toLowerCase().includes('ashdi');
                         const providerName = player.name;
 
+                        if (isAshdi) {
+                            console.log(`[UAFlix] Handling Ashdi Movie direct parse: ${player.src}`);
+                            const ashdiLinks = await getLinksFromAshdiUrl(player.src, title || targetUa, null, fullPosterUrl);
+                            if (ashdiLinks && ashdiLinks.length > 0) {
+                                ashdiLinks.forEach(link => {
+                                    ashdiResults.push({
+                                        title: link.title || providerName,
+                                        file: link.file,
+                                        poster: link.poster || fullPosterUrl,
+                                        subtitle: link.subtitle
+                                    });
+                                });
+                            }
+                            continue;
+                        }
+
                         let m3u8Link = "";
                         let subtitlesArr = [];
 
@@ -194,6 +210,133 @@ module.exports = {
 
                 const finalResult = [];
                 const ashdiSerialResult = [];
+
+                // --- Single iframe serial (no separate episode pages, e.g. zetvideo) ---
+                if (episodeItems.length === 0) {
+                    console.log('[UAFlix] No episode items found, checking for single serial iframe');
+                    const tabs = $$('.tabs-sel .tabs-link');
+                    const contents = $$('.tabs-b.video-box');
+                    
+                    for (let ti = 0; ti < Math.max(tabs.length, 1); ti++) {
+                        const tabName = tabs.length > 0 ? $$(tabs[ti]).text().trim() : 'Основний';
+                        const contentDiv = contents.length > 0 ? contents.eq(ti) : $$('.video-box').first();
+                        const iframeSrc = contentDiv.find('iframe').attr('src') || $$('iframe').attr('src');
+                        
+                        if (!iframeSrc) continue;
+                        console.log(`[UAFlix] Single-iframe tab ${ti}: ${tabName} -> ${iframeSrc}`);
+
+                        // Ashdi serial
+                        if (iframeSrc.includes('ashdi.vip/serial/')) {
+                            const cleanUrl = iframeSrc.split('?')[0];
+                            const parsed = await getLinksFromAshdiUrl(cleanUrl, title || '');
+                            if (parsed && parsed.length > 0) {
+                                const voicesMap = {};
+                                parsed.forEach(ep => {
+                                    const v = ep.name || ep.voice || tabName;
+                                    if (!voicesMap[v]) voicesMap[v] = [];
+                                    voicesMap[v].push(ep);
+                                });
+                                for (const [voiceName, eps] of Object.entries(voicesMap)) {
+                                    const seasonsMap = {};
+                                    eps.forEach(ep => {
+                                        const sn = ep.season || 1;
+                                        if (!seasonsMap[sn]) seasonsMap[sn] = [];
+                                        seasonsMap[sn].push(ep);
+                                    });
+                                    const playlist = Object.keys(seasonsMap).sort((a,b)=>a-b).map(sn => ({
+                                        title: `Сезон ${sn}`,
+                                        folder: seasonsMap[sn].sort((a,b)=>(a.episode||0)-(b.episode||0))
+                                    }));
+                                    ashdiSerialResult.push({ title: voiceName, folder: playlist });
+                                }
+                                continue;
+                            }
+                        }
+
+                        // Zetvideo serial or other embedded player
+                        try {
+                            const iframeRes = await axios.get(iframeSrc, {
+                                headers: { ...HEADERS, 'Referer': contentUrl },
+                                ...axiosConfig
+                            });
+                            const iframeHtml = iframeRes.data;
+
+                            // Parse file: JSON from playerjs init
+                            const fileMatch = iframeHtml.match(/file\s*:\s*'(\[[\s\S]*?\])'\s*[,}]/);
+                            if (fileMatch) {
+                                let playlist;
+                                try { playlist = JSON.parse(fileMatch[1]); } catch(e) { playlist = null; }
+
+                                if (Array.isArray(playlist) && playlist.length > 0) {
+                                    console.log(`[UAFlix] Parsed zetvideo serial: ${playlist.length} voice(s)`);
+                                    
+                                    for (const voice of playlist) {
+                                        const voiceName = (voice.title || tabName).trim();
+                                        const seasons = Array.isArray(voice.folder) ? voice.folder : [];
+
+                                        const seasonFolders = seasons.map(season => {
+                                            const seasonTitle = (season.title || 'Сезон 1').trim();
+                                            const episodes = Array.isArray(season.folder) ? season.folder : [];
+
+                                            const seasonMatch = seasonTitle.match(/(\d+)/);
+                                            const sNum = seasonMatch ? parseInt(seasonMatch[1]) : 1;
+
+                                            const epItems = episodes.map((ep, ei) => {
+                                                const epTitle = (ep.title || `Серія ${ei + 1}`).trim();
+                                                const epMatch = epTitle.match(/(\d+)/);
+                                                const eNum = epMatch ? parseInt(epMatch[1]) : ei + 1;
+
+                                                const m3u8 = ep.file || '';
+                                                const poster = ep.poster || '';
+                                                const subtitle = ep.subtitle || '';
+
+                                                let proxyLink = `${host}/api/uaflix/proxy/master.m3u8?url=${encodeURIComponent(m3u8)}&referer=${encodeURIComponent(iframeSrc)}`;
+                                                if (subtitle) {
+                                                    const subs = [{ label: 'Українська', url: subtitle }];
+                                                    proxyLink += `&subtitles=${encodeURIComponent(JSON.stringify(subs))}`;
+                                                }
+
+                                                return {
+                                                    title: epTitle,
+                                                    file: proxyLink,
+                                                    poster: poster,
+                                                    season: sNum,
+                                                    episode: eNum
+                                                };
+                                            });
+
+                                            return { title: seasonTitle, folder: epItems };
+                                        });
+
+                                        finalResult.push({ title: voiceName, folder: seasonFolders });
+                                    }
+                                    continue;
+                                }
+                            }
+
+                            // Fallback: single m3u8 from iframe
+                            const m3u8Match = iframeHtml.match(/file:\s?["']([^"']+\.m3u8)["']/);
+                            if (m3u8Match) {
+                                const proxyLink = `${host}/api/uaflix/proxy/master.m3u8?url=${encodeURIComponent(m3u8Match[1])}&referer=${encodeURIComponent(iframeSrc)}`;
+                                finalResult.push({
+                                    title: tabName,
+                                    file: proxyLink,
+                                    poster: fullPosterUrl
+                                });
+                            }
+                        } catch (iframeErr) {
+                            console.error(`[UAFlix] Error fetching single iframe: ${iframeErr.message}`);
+                        }
+                    }
+
+                    if (!ashdiSerialResult.length && !finalResult.length) return null;
+                    const routes = {};
+                    if (ashdiSerialResult.length) routes.ashdi = ashdiSerialResult;
+                    if (finalResult.length) routes.uaflix = finalResult;
+                    return { _routes: routes };
+                }
+
+                // --- Multi-episode page flow ---
                 let firstEpisodeUrl = null;
                 if (allEpisodesList.length > 0) {
                     allEpisodesList.sort((a, b) => {
