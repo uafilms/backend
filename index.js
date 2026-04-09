@@ -18,6 +18,7 @@ const klon = require('./providers/klon');
 const wormhole = require('./providers/wormhole');
 const uatut = require('./providers/uatut');
 const eneyida = require('./providers/eneyida');
+const uafilmsMe = require('./providers/uafilms-me');
 
 
 // Англомовні провайдери (CinemaOS видалено)
@@ -451,8 +452,8 @@ function raceFirstGroup(tasks, metadata, host) {
 async function getLinks(metadata, host, activeProviderGroups) {
     const results = {};
     const promises = Object.entries(activeProviderGroups).map(async ([groupName, tasks]) => {
-        if (groupName === '_kinoukrStandalone') {
-            // kinoukr runs standalone — returns both ashdi and tortuga
+        if (groupName === '_kinoukrStandalone' || groupName === '_uafilmsMeStandalone') {
+            // standalone providers — return _routes with multiple keys
             try {
                 const result = await tasks(metadata, host);
                 if (result && result._routes) {
@@ -461,7 +462,7 @@ async function getLinks(metadata, host, activeProviderGroups) {
                     }
                 }
             } catch (e) {
-                console.error(`kinoukr standalone failed:`, e.message);
+                console.error(`${groupName} failed:`, e.message);
             }
             return;
         }
@@ -525,6 +526,8 @@ app.get('/api/get', checkTurnstile, async (req, res) => {
     
     // kinoukr runs standalone (returns both ashdi and tortuga routes)
     activeProviders._kinoukrStandalone = (m, h) => kinoukr.getLinks(m.imdb_id, m.title, m.year);
+    // uafilmsMe runs standalone (returns routes keyed by origin: ashdi, etc.)
+    activeProviders._uafilmsMeStandalone = (m, h) => uafilmsMe.getLinks(m.imdb_id, m.title, m.year, h);
     
     const metaCacheKey = `meta_v4_${type}_${id}`;
     const fullCacheKey = `links_v5_${type}_${id}_eng${engMode}`;
@@ -574,13 +577,16 @@ app.get('/api/get', checkTurnstile, async (req, res) => {
             const host = `${req.protocol}://${req.get('host')}`;
             const allLinks = {};
             
-            // kinoukr runs standalone — returns both ashdi and tortuga routes
+            // Standalone providers — run in parallel, return _routes
             const kinoukrPromise = activeProviders._kinoukrStandalone
                 ? activeProviders._kinoukrStandalone(metaData, host)
                 : Promise.resolve(null);
+            const uafilmsMePromise = activeProviders._uafilmsMeStandalone
+                ? activeProviders._uafilmsMeStandalone(metaData, host)
+                : Promise.resolve(null);
             
             const promises = Object.entries(activeProviders).map(async ([groupName, tasks]) => {
-                if (groupName === '_kinoukrStandalone') return; // skip, handled separately
+                if (groupName === '_kinoukrStandalone' || groupName === '_uafilmsMeStandalone') return; // skip, handled separately
                 try {
                     const result = await raceFirstGroup(tasks, metaData, host);
                     if (!result) return;
@@ -617,12 +623,12 @@ app.get('/api/get', checkTurnstile, async (req, res) => {
                 }
             });
             
-            // Run kinoukr in parallel with other groups
-            const kinoukrTask = (async () => {
+            // Run standalone providers in parallel with other groups
+            const standaloneSSE = async (promise, label) => {
                 try {
-                    const kinoukrResult = await kinoukrPromise;
-                    if (kinoukrResult && kinoukrResult._routes) {
-                        for (const [provName, provLinks] of Object.entries(kinoukrResult._routes)) {
+                    const result = await promise;
+                    if (result && result._routes) {
+                        for (const [provName, provLinks] of Object.entries(result._routes)) {
                             allLinks[provName] = provLinks;
                             
                             const chunkMeta = { ...metaData, links: { [provName]: provLinks } };
@@ -634,25 +640,21 @@ app.get('/api/get', checkTurnstile, async (req, res) => {
                                 else payload.seasons = provData;
                                 console.log(`[SSE] Streaming provider: ${provName} at ${new Date().toISOString()}`);
                                 
-                                // CRITICAL: Write and flush immediately to prevent buffering
                                 const written = res.write(`data: ${JSON.stringify(payload)}\n\n`);
-                                console.log(`[SSE] Write result for ${provName}: ${written}`);
-                                
-                                // Force flush if available (compression middleware)
-                                if (typeof res.flush === 'function') {
-                                    res.flush();
-                                    console.log(`[SSE] Flushed ${provName}`);
-                                }
+                                if (typeof res.flush === 'function') res.flush();
                             }
                         }
                     }
                 } catch (e) {
-                    console.error('[SSE] kinoukr failed:', e.message);
+                    console.error(`[SSE] ${label} failed:`, e.message);
                 }
-            })();
+            };
+
+            const kinoukrTask = standaloneSSE(kinoukrPromise, 'kinoukr');
+            const uafilmsMeTask = standaloneSSE(uafilmsMePromise, 'uafilmsMe');
             
             // Wait for all providers to complete
-            await Promise.all([...promises, kinoukrTask]);
+            await Promise.all([...promises, kinoukrTask, uafilmsMeTask]);
             
             // Cache the full result
             cache.set(fullCacheKey, { meta: metaData, links: allLinks }, 3600);
@@ -703,6 +705,7 @@ app.get('/embed', checkTurnstile, async (req, res) => {
     }
     
     activeProviders._kinoukrStandalone = (m, h) => kinoukr.getLinks(m.imdb_id, m.title, m.year);
+    activeProviders._uafilmsMeStandalone = (m, h) => uafilmsMe.getLinks(m.imdb_id, m.title, m.year, h);
 
     const fullCacheKey = `links_v5_${type}_${id}_eng${engMode}`;
     let cachedLinks = cache.get(fullCacheKey);
