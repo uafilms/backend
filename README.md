@@ -35,7 +35,15 @@ cd backend
 ---
 
 ## Джерела
-Ashdi, HDVB (Eneyida), UAFlix, MoonAnime, 🇬🇧UEmbed
+
+| VOD провайдер | Сайт | Сайтів, що парсять | Мова |
+|---|---|---|---|
+| Ashdi | [ashdi.vip](https://ashdi.vip) | 5 | 🇺🇦 |
+| HDVB (Eneyida, UA Serials) | [eneyida.tv](https://eneyida.tv) | 2 | 🇺🇦 |
+| Tortuga | [tortuga.tw](https://tortuga.tw) | 2 | 🇺🇦 |
+| UAFlix | [uafix.net](https://uafix.net) | 1 | 🇺🇦 |
+| MoonAnime | [moonanime.art](https://moonanime.art) | 1 | 🇺🇦 |
+| UEmbed | [cinepro.aartzz.pp.ua](https://cinepro.aartzz.pp.ua) | 1 | 🇬🇧 |
 
 ---
 
