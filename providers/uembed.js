@@ -1,4 +1,5 @@
 const axios = require('axios');
+const proxyManager = require('../utils/proxyManager');
 
 const BASE_URL = 'https://cinepro.aartzz.pp.ua';
 
@@ -11,7 +12,7 @@ module.exports = {
 
         try {
             const url = `${BASE_URL}/movie/${tmdbId}?providers=uembed`;
-            const response = await axios.get(url, { validateStatus: false });
+            const response = await axios.get(url, { validateStatus: false, ...proxyManager.getConfig('uembed') });
 
             if (response.status !== 200 || !response.data || !response.data.files) {
                 return [];

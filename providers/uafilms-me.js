@@ -3,6 +3,7 @@
 // API: uafilm.me — restreams from other providers (ashdi, etc.)
 
 const axios = require('axios');
+const proxyManager = require('../utils/proxyManager');
 
 const BASE_URL = 'https://uafilm.me';
 const API = `${BASE_URL}/api/v1`;
@@ -37,6 +38,7 @@ async function searchTitle(title, year, type) {
         const { data } = await axios.get(`${API}/search/${query}?loader=searchAutocomplete`, {
             headers: HEADERS,
             timeout: 8000,
+            ...proxyManager.getConfig('uafilms-me'),
         });
 
         if (!data?.results?.length) return null;
@@ -67,6 +69,7 @@ async function getVideosForTitle(titleId) {
         const { data } = await axios.get(`${API}/videos?title_id=${titleId}`, {
             headers: HEADERS,
             timeout: 10000,
+            ...proxyManager.getConfig('uafilms-me'),
         });
 
         const videos = data?.pagination?.data;
@@ -84,6 +87,7 @@ async function getVideoById(videoId) {
         const { data } = await axios.get(`${API}/videos/${videoId}`, {
             headers: HEADERS,
             timeout: 8000,
+            ...proxyManager.getConfig('uafilms-me'),
         });
         return data?.video || null;
     } catch (e) {
@@ -102,7 +106,7 @@ async function getAllSeasons(titleId) {
             const url = page === 1
                 ? `${API}/titles/${titleId}?loader=titlePage`
                 : `${API}/titles/${titleId}?loader=titlePage&seasonPage=${page}`;
-            const { data } = await axios.get(url, { headers: HEADERS, timeout: 10000 });
+            const { data } = await axios.get(url, { headers: HEADERS, timeout: 10000, ...proxyManager.getConfig('uafilms-me') });
 
             const seasonsData = data?.seasons;
             if (!seasonsData?.data?.length) break;
@@ -130,7 +134,7 @@ async function getAllEpisodes(titleId) {
             const url = page === 1
                 ? `${API}/titles/${titleId}?loader=titlePage`
                 : `${API}/titles/${titleId}?loader=titlePage&episodePage=${page}`;
-            const { data } = await axios.get(url, { headers: HEADERS, timeout: 10000 });
+            const { data } = await axios.get(url, { headers: HEADERS, timeout: 10000, ...proxyManager.getConfig('uafilms-me') });
 
             const epsData = data?.episodes;
             if (!epsData?.data?.length) break;
