@@ -39,7 +39,7 @@ cd backend
 | VOD провайдер | Сайт | Сайтів, що парсять | Мова |
 |---|---|---|---|
 | Ashdi | [ashdi.vip](https://ashdi.vip) | 5 | 🇺🇦 |
-| HDVB (Eneyida, UA Serials) | [eneyida.tv](https://eneyida.tv) | 2 | 🇺🇦 |
+| HDVB | [hdvbua.pro](https://hdvbua.pro) | 2 | 🇺🇦 |
 | Tortuga | [tortuga.tw](https://tortuga.tw) | 2 | 🇺🇦 |
 | UAFlix | [uafix.net](https://uafix.net) | 1 | 🇺🇦 |
 | MoonAnime | [moonanime.art](https://moonanime.art) | 1 | 🇺🇦 |
