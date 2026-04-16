@@ -7,7 +7,7 @@ const path = require('path');
 const fs = require('fs');
 const cheerio = require('cheerio');
 
-// Імпорти провайдерів
+// Провайдери
 const tmdb = require('./tmdb');
 const moonanime = require('./providers/moonanime');
 const uaflix = require('./providers/uaflix');
@@ -128,7 +128,6 @@ const checkTurnstile = async (req, res, next) => {
 };
 
 
-// === STATIC FILES ===
 const nodeModules = path.join(__dirname, 'node_modules');
 app.use('/static/videojs', express.static(path.join(nodeModules, 'video.js/dist')));
 app.use('/static/quality-levels', express.static(path.join(nodeModules, 'videojs-contrib-quality-levels/dist')));
@@ -138,7 +137,6 @@ app.use('/static/mobile-ui', express.static(path.join(nodeModules, 'videojs-mobi
 app.use('/static/custom', express.static(__dirname));
 app.use(express.static('public'));
 
-// --- HELPER FUNCTIONS ---
 const fetchWithManualRedirect = async (url, config = {}, retries = 5) => {
     try {
         const response = await axios.get(url, { ...config, responseType: 'stream', validateStatus: status => status < 400, maxRedirects: 0 });
@@ -445,30 +443,54 @@ const engProviderGroups = {
     ],
 };
 
-// RaceFirst: перший успішний результат перемагає
+// Wrap any promise with a timeout — resolves null on expiry
+function withTimeout(promise, ms) {
+    return Promise.race([
+        promise,
+        new Promise(resolve => setTimeout(() => resolve(null), ms)),
+    ]);
+}
+
+// RaceFirst: перший успішний результат перемагає, з загальним таймаутом
 function raceFirstGroup(tasks, metadata, host) {
+    const PROVIDER_TIMEOUT = 10_000; // 10s per group — prevents infinite hangs
     return new Promise((resolve) => {
         const controller = new AbortController();
         const { signal } = controller;
         let remaining = tasks.length;
         let resolved = false;
         if (remaining === 0) { resolve(null); return; }
+
+        const timer = setTimeout(() => {
+            if (!resolved) {
+                resolved = true;
+                controller.abort();
+                resolve(null);
+            }
+        }, PROVIDER_TIMEOUT);
+
+        const done = (result) => {
+            if (resolved) return;
+            clearTimeout(timer);
+            resolved = true;
+            controller.abort();
+            resolve(result);
+        };
+
         tasks.forEach(task => {
             task(metadata, host, signal)
                 .then(result => {
                     if (resolved) return;
                     if (result) {
-                        resolved = true;
-                        controller.abort();
-                        resolve(result);
+                        done(result);
                     } else {
                         remaining--;
-                        if (remaining === 0 && !resolved) resolve(null);
+                        if (remaining === 0) done(null);
                     }
                 })
                 .catch(() => {
                     remaining--;
-                    if (remaining === 0 && !resolved) resolve(null);
+                    if (remaining === 0) done(null);
                 });
         });
     });
@@ -480,7 +502,7 @@ async function getLinks(metadata, host, activeProviderGroups) {
         if (groupName === '_kinoukrStandalone' || groupName === '_uafilmsMeStandalone') {
             // standalone providers — return _routes with multiple keys
             try {
-                const result = await tasks(metadata, host);
+                const result = await withTimeout(tasks(metadata, host), 10_000);
                 if (result && result._routes) {
                     for (const [key, val] of Object.entries(result._routes)) {
                         results[key] = val;
@@ -602,12 +624,13 @@ app.get('/api/get', checkTurnstile, async (req, res) => {
             const host = `${req.protocol}://${req.get('host')}`;
             const allLinks = {};
             
-            // Standalone providers — run in parallel, return _routes
+            // Standalone providers — run in parallel, return _routes (with timeout)
+            const STANDALONE_TIMEOUT = 10_000;
             const kinoukrPromise = activeProviders._kinoukrStandalone
-                ? activeProviders._kinoukrStandalone(metaData, host)
+                ? withTimeout(activeProviders._kinoukrStandalone(metaData, host), STANDALONE_TIMEOUT)
                 : Promise.resolve(null);
             const uafilmsMePromise = activeProviders._uafilmsMeStandalone
-                ? activeProviders._uafilmsMeStandalone(metaData, host)
+                ? withTimeout(activeProviders._uafilmsMeStandalone(metaData, host), STANDALONE_TIMEOUT)
                 : Promise.resolve(null);
             
             const promises = Object.entries(activeProviders).map(async ([groupName, tasks]) => {
@@ -678,8 +701,13 @@ app.get('/api/get', checkTurnstile, async (req, res) => {
             const kinoukrTask = standaloneSSE(kinoukrPromise, 'kinoukr');
             const uafilmsMeTask = standaloneSSE(uafilmsMePromise, 'uafilmsMe');
             
-            // Wait for all providers to complete
-            await Promise.all([...promises, kinoukrTask, uafilmsMeTask]);
+            // Wait for all providers to complete with a global timeout
+            const SSE_TIMEOUT = 15_000; // 15s — hard limit for the whole SSE request
+            const allProviderTasks = [...promises, kinoukrTask, uafilmsMeTask];
+            await Promise.race([
+                Promise.all(allProviderTasks),
+                new Promise(resolve => setTimeout(resolve, SSE_TIMEOUT)),
+            ]);
             
             // Cache the full result
             cache.set(fullCacheKey, { meta: metaData, links: allLinks }, 3600);
@@ -1066,16 +1094,13 @@ app.get('/api/moonanime/stream/master.m3u8', checkTurnstile, async (req, res) =>
 
             const isWebm = entries.some(e => /\/content\/v\//.test(e.url));
 
-            if (isWebm) {
-                // webm multi-quality — повертаємо Playerjs quality-list
-                // кожна якість йде через /api/moonanime/webm.webm (pipe через наш сервер)
-                // URL закінчується на .webm → type detection дає video/webm, не HLS
-                const qualityList = entries
-                    .map(e => `[${e.quality}]${proxyHost}/api/moonanime/webm.webm?url=${encodeURIComponent(e.url)}`)
-                    .join(',');
-                res.set('Content-Type', 'text/plain; charset=utf-8');
-                return res.send(qualityList);
-            }
+        if (isWebm) {
+            const qualityList = entries
+                .map(e => `[${e.quality}]${proxyHost}/api/moonanime/webm.webm?url=${encodeURIComponent(e.url)}`)
+                .join(',');
+            res.set('Content-Type', 'text/plain; charset=utf-8');
+            return res.send(qualityList);
+        }
 
             // HLS — Генеруємо master m3u8 де кожна якість — окремий варіант
             let master = '#EXTM3U\n';
@@ -1242,7 +1267,9 @@ app.get('/api/search', async (req, res) => {
     // ... (без змін)
     const { q, page = 1, adult = 'false' } = req.query; 
     if (!q) return res.json({ results: [], total_pages: 0 });
-    try { const data = await tmdb.search(q, page, adult === 'true'); res.json(data); } catch (e) { res.status(500).json({ error: "Search failed" }); }
+    try { const data = await tmdb.search(q, page, adult === 'true'); res.json(data);     } catch (e) {
+        res.status(500).json({ error: "Search failed" });
+    }
 });
 
 app.get('/api/torrents', checkTurnstile, async (req, res) => {
