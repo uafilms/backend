@@ -250,6 +250,7 @@ async function extractUaflixM3u8(pageUrl, playerIndex = 0) {
 
 function normalizeResponse(tmdbData, type, token = '', host = '') {
     const providers = {};
+    const seasonsInfo = (type === 'tv' && tmdbData && tmdbData.seasons_info) ? tmdbData.seasons_info : null;
     
     const addMovieSource = (providerName, sourceObj) => {
         if (!providers[providerName]) providers[providerName] = [];
@@ -257,6 +258,16 @@ function normalizeResponse(tmdbData, type, token = '', host = '') {
     };
     
     const addEpisodeSource = (providerName, season, episode, sourceObj) => {
+        // Cap against TMDB authoritative data to drop phantom episodes from
+        // provider tabs mis-linked to other shows (e.g., ashdi/kinoukr voices).
+        if (seasonsInfo) {
+            const sNum = parseInt(season, 10);
+            const eNum = parseInt(episode, 10);
+            const maxEp = seasonsInfo[sNum];
+            if (typeof maxEp === 'number' && (isNaN(eNum) || eNum < 1 || eNum > maxEp)) {
+                return; // drop episode beyond TMDB episode_count for this season
+            }
+        }
         if (!providers[providerName]) providers[providerName] = {};
         const p = providers[providerName];
         const s = String(season);
@@ -382,12 +393,26 @@ async function getMetadata(id, type) {
     let imdbRating = null;
     if (extIds?.imdb_id) { try { const r = await axios.get(`https://api.imdbapi.dev/titles/${extIds.imdb_id}`, {timeout: 2000}); imdbRating = r.data?.rating?.aggregateRating; } catch(e){} }
     
+    // Build seasons map for episode-count capping (prevents phantom episodes from mis-tagged provider tabs)
+    let seasonsInfo = null;
+    if (type === 'tv' && Array.isArray(info.seasons)) {
+        seasonsInfo = {};
+        info.seasons.forEach(s => {
+            if (typeof s.season_number === 'number' && typeof s.episode_count === 'number' && s.episode_count > 0) {
+                seasonsInfo[s.season_number] = s.episode_count;
+            }
+        });
+    }
+
     return {
         id, type, title: uaTitle, original_title: orgTitle, 
         imdb_id: extIds?.imdb_id, kinopoisk_id: extIds?.kinopoisk_id,
         imdb_rating: imdbRating, year, genres: info.genres, 
         overview: info.overview, backdrop_path: info.backdrop_path, 
-        poster_path: info.poster_path
+        poster_path: info.poster_path,
+        number_of_episodes: info.number_of_episodes,
+        number_of_seasons: info.number_of_seasons,
+        seasons_info: seasonsInfo
     };
 }
 
