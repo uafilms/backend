@@ -325,6 +325,11 @@ function normalizeResponse(tmdbData, type, token = '', host = '') {
                         finalUrl = `${host}/api/tortuga/proxy/master.m3u8?url=${encodeURIComponent(finalUrl)}`;
                         mimeType = 'application/x-mpegURL';
                     }
+                    // Route Ashdi m3u8 URLs through /proxy/m3u8 to avoid CORS
+                    if (providerName === 'ashdi' && (finalUrl.includes('.m3u8') || finalUrl.includes('ashdi.vip') || finalUrl.includes('ashdi.aartzz.pp.ua'))) {
+                        finalUrl = `${host}/proxy/m3u8?url=${encodeURIComponent(finalUrl)}`;
+                        mimeType = 'application/x-mpegURL';
+                    }
                     if (token && (finalUrl.includes('/api/uaflix') || finalUrl.includes('/api/moonanime') || finalUrl.includes('/proxy/m3u8') || finalUrl.includes('/api/tortuga'))) {
                         const separator = finalUrl.includes('?') ? '&' : '?';
                         if (!finalUrl.includes('token=')) {
@@ -1221,6 +1226,7 @@ app.get('/proxy/m3u8', checkTurnstile, async (req, res) => {
         if (!url) return res.status(400).send('URL required');
 
         const isMoonAnime = url.includes('moonanime.art') || url.includes('mooncdn.space') || url.includes('s.moonanime');
+        const isAshdi = url.includes('ashdi.vip') || url.includes('ashdi.aartzz.pp.ua');
         const headers = isMoonAnime ? {
             'User-Agent': MOON_VOD_HEADERS['user-agent'],
             'Origin': 'https://moonanime.art',
@@ -1230,6 +1236,11 @@ app.get('/proxy/m3u8', checkTurnstile, async (req, res) => {
             'sec-fetch-dest': 'empty',
             'sec-fetch-mode': 'cors',
             'sec-fetch-site': 'same-site',
+        } : isAshdi ? {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Origin': 'https://ashdi.vip',
+            'Referer': 'https://ashdi.vip/',
+            'Accept': '*/*',
         } : {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
             'Accept': '*/*',
@@ -1240,7 +1251,7 @@ app.get('/proxy/m3u8', checkTurnstile, async (req, res) => {
         const proxyHost = `${protocol}://${host}`;
 
         const response = await axios.get(url, { headers });
-        const corsProxySegments = isMoonAnime;
+        const corsProxySegments = isMoonAnime || isAshdi;
         const modifiedM3u8 = parseMasterPlaylist(response.data, url, proxyHost, { corsProxySegments });
         res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
         res.send(modifiedM3u8);
