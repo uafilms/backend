@@ -4,7 +4,7 @@ const proxyManager = require('../utils/proxyManager');
 const BASE_URL = 'https://cinepro.aartzz.pp.ua';
 
 module.exports = {
-    getLinks: async (metadata) => {
+    getLinks: async (metadata, signal) => {
         if (metadata.type !== 'movie') return [];
 
         const tmdbId = metadata.id;
@@ -12,7 +12,7 @@ module.exports = {
 
         try {
             const url = `${BASE_URL}/movie/${tmdbId}?providers=uembed`;
-            const response = await axios.get(url, { validateStatus: false, ...proxyManager.getConfig('uembed') });
+            const response = await axios.get(url, { validateStatus: false, ...proxyManager.getConfig('uembed'), ...(signal ? { signal } : {}) });
 
             if (response.status !== 200 || !response.data || !response.data.files) {
                 return [];
@@ -41,6 +41,7 @@ module.exports = {
             });
 
         } catch (e) {
+            if (axios.isCancel(e)) return [];
             console.error(`[UEmbed] Error fetching for ${tmdbId}:`, e.message);
             return [];
         }

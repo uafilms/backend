@@ -22,16 +22,16 @@ const normalizeTitle = (str) => {
 };
 
 module.exports = {
-    getLinks: async (imdb_id, title, origTitle, year, type, host) => {
+    getLinks: async (imdb_id, title, origTitle, year, type, host, signal) => {
         const axiosConfig = proxyManager.getConfig('uaflix') || {};
         
         try {
             console.log(`[UAFlix] Searching for: ${title} (${year})`);
-            let candidates = await searchUaflix(title, year, axiosConfig);
+            let candidates = await searchUaflix(title, year, axiosConfig, signal);
 
             if ((!candidates || candidates.length === 0) && origTitle) {
                 console.log(`[UAFlix] UA search failed, trying EN: ${origTitle}`);
-                const candidatesEn = await searchUaflix(origTitle, year, axiosConfig);
+                const candidatesEn = await searchUaflix(origTitle, year, axiosConfig, signal);
                 if (candidatesEn && candidatesEn.length > 0) candidates = candidatesEn;
             }
 
@@ -68,7 +68,7 @@ module.exports = {
             // --- ФІЛЬМИ (Movie) ---
             if (type === 'movie') {
                 console.log('[UAFlix] Processing Movie...');
-                const moviePageRes = await axios.get(contentUrl, { headers: HEADERS, ...axiosConfig });
+                const moviePageRes = await axios.get(contentUrl, { headers: HEADERS, ...axiosConfig, ...(signal ? { signal } : {}) });
                 const $m = cheerio.load(moviePageRes.data);
 
                 const ogImage = $m('meta[property="og:image"]').attr('content');
@@ -120,7 +120,8 @@ module.exports = {
 
                         const iframeRes = await axios.get(player.src, {
                             headers: { ...HEADERS, 'Referer': contentUrl },
-                            ...axiosConfig
+                            ...axiosConfig,
+                            ...(signal ? { signal } : {})
                         });
                         const iframeHtml = iframeRes.data;
 
@@ -173,7 +174,7 @@ module.exports = {
             // --- СЕРІАЛИ (TV) ---
             if (type === 'tv') {
                 console.log('[UAFlix] Processing TV Show...');
-                const showRes = await axios.get(contentUrl, { headers: HEADERS, ...axiosConfig });
+                const showRes = await axios.get(contentUrl, { headers: HEADERS, ...axiosConfig, ...(signal ? { signal } : {}) });
                 const $$ = cheerio.load(showRes.data);
                 
                 const episodesMap = {};
@@ -261,7 +262,8 @@ module.exports = {
                         try {
                             const iframeRes = await axios.get(iframeSrc, {
                                 headers: { ...HEADERS, 'Referer': contentUrl },
-                                ...axiosConfig
+                                ...axiosConfig,
+                                ...(signal ? { signal } : {})
                             });
                             const iframeHtml = iframeRes.data;
 
@@ -354,7 +356,7 @@ module.exports = {
                 if (firstEpisodeUrl) {
                     console.log(`[UAFlix] Going to first episode: ${firstEpisodeUrl}`);
                     try {
-                        const epPageRes = await axios.get(firstEpisodeUrl, { headers: HEADERS, ...axiosConfig });
+                        const epPageRes = await axios.get(firstEpisodeUrl, { headers: HEADERS, ...axiosConfig, ...(signal ? { signal } : {}) });
                         const $ep = cheerio.load(epPageRes.data);
                         
                         const tabs = $ep('.tabs-sel .tabs-link');
@@ -412,7 +414,8 @@ module.exports = {
                                 try {
                                     const iframeRes = await axios.get(iframeSrc, {
                                         headers: { ...HEADERS, 'Referer': firstEpisodeUrl },
-                                        ...axiosConfig
+                                        ...axiosConfig,
+                                        ...(signal ? { signal } : {})
                                     });
                                     const iframeHtml = iframeRes.data;
                                     const vodPosterMatch = iframeHtml.match(/poster\s*:\s*["']([^"']+)["']/);
@@ -505,7 +508,8 @@ module.exports = {
                                 try {
                                     const iframeRes = await axios.get(iframeSrc, {
                                         headers: { ...HEADERS, 'Referer': firstEpisodeUrl },
-                                        ...axiosConfig
+                                        ...axiosConfig,
+                                        ...(signal ? { signal } : {})
                                     });
                                     const iframeHtml = iframeRes.data;
                                     const vodPosterMatch = iframeHtml.match(/poster\s*:\s*["']([^"']+)["']/);
@@ -571,10 +575,10 @@ module.exports = {
     }
 };
 
-async function searchUaflix(query, year, config) {
+async function searchUaflix(query, year, config, signal) {
     try {
         const searchUrl = `${BASE_URL}/index.php?do=search&subaction=search&story=${encodeURIComponent(query)}`;
-        const { data } = await axios.get(searchUrl, { headers: HEADERS, ...config, timeout: 5000 });
+        const { data } = await axios.get(searchUrl, { headers: HEADERS, ...config, timeout: 5000, ...(signal ? { signal } : {}) });
         const $ = cheerio.load(data);
         
         let candidates = [];

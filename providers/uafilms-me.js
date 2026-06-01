@@ -32,13 +32,14 @@ function titlesMatch(a, b) {
     return cleanTitle(a) === cleanTitle(b);
 }
 
-async function searchTitle(title, year, type) {
+async function searchTitle(title, year, type, signal) {
     try {
         const query = encodeURIComponent(title);
         const { data } = await axios.get(`${API}/search/${query}?loader=searchAutocomplete`, {
             headers: HEADERS,
             timeout: 8000,
             ...proxyManager.getConfig('uafilms-me'),
+            ...(signal ? { signal } : {}),
         });
 
         if (!data?.results?.length) return null;
@@ -64,12 +65,13 @@ async function searchTitle(title, year, type) {
     }
 }
 
-async function getVideosForTitle(titleId) {
+async function getVideosForTitle(titleId, signal) {
     try {
         const { data } = await axios.get(`${API}/videos?title_id=${titleId}`, {
             headers: HEADERS,
             timeout: 10000,
             ...proxyManager.getConfig('uafilms-me'),
+            ...(signal ? { signal } : {}),
         });
 
         const videos = data?.pagination?.data;
@@ -82,12 +84,13 @@ async function getVideosForTitle(titleId) {
     }
 }
 
-async function getVideoById(videoId) {
+async function getVideoById(videoId, signal) {
     try {
         const { data } = await axios.get(`${API}/videos/${videoId}`, {
             headers: HEADERS,
             timeout: 8000,
             ...proxyManager.getConfig('uafilms-me'),
+            ...(signal ? { signal } : {}),
         });
         return data?.video || null;
     } catch (e) {
@@ -96,7 +99,7 @@ async function getVideoById(videoId) {
     }
 }
 
-async function getAllSeasons(titleId) {
+async function getAllSeasons(titleId, signal) {
     const seasons = [];
     let page = 1;
     const maxPages = 20;
@@ -106,7 +109,7 @@ async function getAllSeasons(titleId) {
             const url = page === 1
                 ? `${API}/titles/${titleId}?loader=titlePage`
                 : `${API}/titles/${titleId}?loader=titlePage&seasonPage=${page}`;
-            const { data } = await axios.get(url, { headers: HEADERS, timeout: 10000, ...proxyManager.getConfig('uafilms-me') });
+            const { data } = await axios.get(url, { headers: HEADERS, timeout: 10000, ...proxyManager.getConfig('uafilms-me'), ...(signal ? { signal } : {}) });
 
             const seasonsData = data?.seasons;
             if (!seasonsData?.data?.length) break;
@@ -124,7 +127,7 @@ async function getAllSeasons(titleId) {
     return seasons;
 }
 
-async function getAllEpisodes(titleId) {
+async function getAllEpisodes(titleId, signal) {
     const episodes = [];
     let page = 1;
     const maxPages = 100;
@@ -134,7 +137,7 @@ async function getAllEpisodes(titleId) {
             const url = page === 1
                 ? `${API}/titles/${titleId}?loader=titlePage`
                 : `${API}/titles/${titleId}?loader=titlePage&episodePage=${page}`;
-            const { data } = await axios.get(url, { headers: HEADERS, timeout: 10000, ...proxyManager.getConfig('uafilms-me') });
+            const { data } = await axios.get(url, { headers: HEADERS, timeout: 10000, ...proxyManager.getConfig('uafilms-me'), ...(signal ? { signal } : {}) });
 
             const epsData = data?.episodes;
             if (!epsData?.data?.length) break;
@@ -171,11 +174,11 @@ function originToRoute(origin) {
 }
 
 module.exports = {
-    getLinks: async function (imdbId, title, year, host) {
+    getLinks: async function (imdbId, title, year, host, signal) {
         if (!title) return null;
 
         console.log(`[UafilmME] Searching: "${title}" (${year})`);
-        const found = await searchTitle(title, year);
+        const found = await searchTitle(title, year, null, signal);
         if (!found) {
             console.log('[UafilmME] Not found');
             return null;
@@ -185,7 +188,7 @@ module.exports = {
 
         // --- MOVIE ---
         if (!found.is_series) {
-            const videos = await getVideosForTitle(found.id);
+            const videos = await getVideosForTitle(found.id, signal);
             if (!videos.length) return null;
 
             const routes = {};
@@ -206,7 +209,7 @@ module.exports = {
         }
 
         // --- TV SERIES ---
-        const episodes = await getAllEpisodes(found.id);
+        const episodes = await getAllEpisodes(found.id, signal);
         if (!episodes.length) {
             console.log('[UafilmME] No episodes found');
             return null;
@@ -236,7 +239,7 @@ module.exports = {
         for (let i = 0; i < videoIds.length; i += BATCH_SIZE) {
             const batch = videoIds.slice(i, i + BATCH_SIZE);
             const videoPromises = batch.map(async (ep) => {
-                const video = await getVideoById(ep.videoId);
+                const video = await getVideoById(ep.videoId, signal);
                 if (!video?.src) return null;
                 return { ...ep, video };
             });
