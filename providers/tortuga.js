@@ -1,17 +1,27 @@
 // Site: tortuga.tw → Provider: Tortuga
 // Parses /vod/XXXX (movies) and /embed/XXXX (TV series) pages
-// Decodes base64+reversed file URLs to get actual m3u8 links
+// Decodes XOR-encrypted file/poster values to get actual m3u8 links
+// Algorithm reverse-engineered from tor.core.min.js (XOR + first-byte key)
 
 const axios = require('axios');
 const proxyManager = require('../utils/proxyManager');
 
-// Decode Tortuga file: base64 → reverse → httpr→https
+function _xorKey(n, i) {
+    return (n + i * 7 + 13) % 256;
+}
+
 function decodeTortugaFile(encoded) {
-    if (!encoded) return null;
+    if (!encoded || encoded.trim() === '') return null;
     try {
-        const decoded = Buffer.from(encoded, 'base64').toString('utf8');
-        const reversed = decoded.split('').reverse().join('');
-        return reversed.replace(/^httpr:/, 'https:');
+        const clean = encoded.replace(/==+$/, '');
+        const raw = Buffer.from(clean, 'base64').toString('binary');
+        if (raw.length < 2) return null;
+        const key = raw.charCodeAt(0);
+        let out = '';
+        for (let i = 1; i < raw.length; i++) {
+            out += String.fromCharCode(raw.charCodeAt(i) ^ _xorKey(key, i - 1));
+        }
+        try { return decodeURIComponent(escape(out)); } catch { return out; }
     } catch { return null; }
 }
 
@@ -21,10 +31,10 @@ const HEADERS = {
 };
 
 // Parse movie VOD page → returns {file: m3u8URL, poster: posterURL}
-async function parseTortugaVod(vodUrl) {
+async function parseTortugaVod(vodUrl, signal) {
     try {
         const proxyConfig = proxyManager.getConfig('tortuga');
-        const res = await axios.get(vodUrl, { headers: HEADERS, timeout: 15000, ...proxyConfig });
+        const res = await axios.get(vodUrl, { headers: HEADERS, timeout: 15000, ...proxyConfig, ...(signal ? { signal } : {}) });
         const html = res.data;
         
         // Extract file (m3u8 URL)
@@ -45,10 +55,10 @@ async function parseTortugaVod(vodUrl) {
 }
 
 // Parse TV series embed page → returns full folder/file JSON
-async function parseTortugaEmbed(embedUrl) {
+async function parseTortugaEmbed(embedUrl, signal) {
     try {
         const proxyConfig = proxyManager.getConfig('tortuga');
-        const res = await axios.get(embedUrl, { headers: HEADERS, timeout: 15000, ...proxyConfig });
+        const res = await axios.get(embedUrl, { headers: HEADERS, timeout: 15000, ...proxyConfig, ...(signal ? { signal } : {}) });
         const html = res.data;
         const fileMatch = html.match(/file\s*:\s*["']([A-Za-z0-9+/=]{20,})["']/);
         if (!fileMatch) return null;
@@ -87,7 +97,7 @@ async function parseTortugaEmbed(embedUrl) {
  * @param {Array} players - [{tabName, seasons:[...], episodes:[...], url}]
  * @returns {Promise<Object|null>} {_routes: {tortuga: [...]}}
  */
-async function transformTortugaPlayers(players) {
+async function transformTortugaPlayers(players, signal) {
     const routes = {};
 
     for (const player of players) {
@@ -95,7 +105,6 @@ async function transformTortugaPlayers(players) {
         let transformed;
 
         if (player.seasons && player.seasons.length > 0) {
-            // TV series format: seasons → episodes → sounds
             transformed = {
                 title: tabName,
                 folder: player.seasons.map(season => ({
@@ -110,7 +119,6 @@ async function transformTortugaPlayers(players) {
                 })),
             };
         } else if (player.episodes && player.episodes.length > 0) {
-            // Movie or single-season format
             const hasMultipleSounds = player.episodes.some(ep => ep.sounds && ep.sounds.length > 1);
             if (hasMultipleSounds) {
                 transformed = {
@@ -136,9 +144,8 @@ async function transformTortugaPlayers(players) {
                 };
             }
         } else if (player.url) {
-            // Direct VOD URL — decode to m3u8
-            const vodData = await parseTortugaVod(player.url);
-            if (!vodData || !vodData.file) continue; // skip if decode fails
+            const vodData = await parseTortugaVod(player.url, signal);
+            if (!vodData || !vodData.file) continue;
             transformed = { title: tabName, file: vodData.file, poster: vodData.poster };
         } else {
             continue;
@@ -159,7 +166,7 @@ module.exports = {
      * @param {Array<{url: string, label?: string}>} iframes - Array of Tortuga iframe URLs
      * @returns {Array|null} folder/file format data for tortuga provider
      */
-    getLinks: async (iframes) => {
+    getLinks: async (iframes, signal) => {
         if (!Array.isArray(iframes) || !iframes.length) return null;
 
         const results = [];
@@ -167,13 +174,13 @@ module.exports = {
         for (const iframe of iframes) {
             if (/tortuga\.tw\/embed\//i.test(iframe.url)) {
                 // TV series embed — decode full JSON structure
-                const parsed = await parseTortugaEmbed(iframe.url);
+                const parsed = await parseTortugaEmbed(iframe.url, signal);
                 if (parsed && parsed.length) {
                     results.push(...parsed);
                 }
             } else if (/tortuga/i.test(iframe.url)) {
                 // Movie VOD — decode single m3u8 URL and poster
-                const vodData = await parseTortugaVod(iframe.url);
+                const vodData = await parseTortugaVod(iframe.url, signal);
                 if (vodData && vodData.file) {
                     results.push({
                         title: iframe.label || 'Tortuga',
