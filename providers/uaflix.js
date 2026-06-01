@@ -183,35 +183,76 @@ module.exports = {
                 const episodeItems = $$('#sers-wr .video-item');
                 console.log(`[UAFlix] Found ${episodeItems.length} episodes on series page`);
 
-                episodeItems.each((i, el) => {
-                    const link = $$(el).find('a.vi-img').attr('href');
-                    const thumb = $$(el).find('img').attr('data-src') || $$(el).find('img').attr('src');
-                    const fullThumb = thumb && !thumb.startsWith('http') ? BASE_URL + thumb : thumb;
-                    const titleText = $$(el).find('.vi-title').text().trim();
-                    const descRate = $$(el).find('.vi-rate').text().trim();
+                // Collect episodes from main page
+                const parseEpisodes = ($ctx, targetMap, targetList) => {
+                    $ctx('#sers-wr .video-item').each((i, el) => {
+                        const link = $ctx(el).find('a.vi-img').attr('href');
+                        const thumb = $ctx(el).find('img').attr('data-src') || $ctx(el).find('img').attr('src');
+                        const fullThumb = thumb && !thumb.startsWith('http') ? BASE_URL + thumb : thumb;
+                        const titleText = $ctx(el).find('.vi-title').text().trim();
+                        const descRate = $ctx(el).find('.vi-rate').text().trim();
 
-                    if (link) {
-                        const seasonMatch = titleText.match(/Сезон\s+(\d+)/i);
-                        const episodeMatch = titleText.match(/Серія\s+(\d+)/i);
-                        const seasonNum = seasonMatch ? parseInt(seasonMatch[1]) : 1;
-                        const episodeNum = episodeMatch ? parseInt(episodeMatch[1]) : i + 1;
+                        if (link) {
+                            const seasonMatch = titleText.match(/Сезон\s+(\d+)/i);
+                            const episodeMatch = titleText.match(/Серія\s+(\d+)/i);
+                            const seasonNum = seasonMatch ? parseInt(seasonMatch[1]) : 1;
+                            const episodeNum = episodeMatch ? parseInt(episodeMatch[1]) : i + 1;
 
-                        if (!episodesMap[seasonNum]) episodesMap[seasonNum] = [];
+                            if (!targetMap[seasonNum]) targetMap[seasonNum] = [];
 
-                        episodesMap[seasonNum].push({
-                            title: `Серія ${episodeNum}${descRate ? ' - ' + descRate : ''}`,
-                            pageUrl: link, 
-                            poster: fullThumb,
-                            season: seasonNum,
-                            episode: episodeNum
-                        });
-                        allEpisodesList.push({
-                            season: seasonNum,
-                            episode: episodeNum,
-                            url: link
-                        });
+                            // Skip duplicates (same season+episode already collected)
+                            const exists = targetMap[seasonNum].some(e => e.episode === episodeNum);
+                            if (exists) return;
+
+                            targetMap[seasonNum].push({
+                                title: `Серія ${episodeNum}${descRate ? ' - ' + descRate : ''}`,
+                                pageUrl: link, 
+                                poster: fullThumb,
+                                season: seasonNum,
+                                episode: episodeNum
+                            });
+                            targetList.push({
+                                season: seasonNum,
+                                episode: episodeNum,
+                                url: link
+                            });
+                        }
+                    });
+                };
+
+                parseEpisodes($$, episodesMap, allEpisodesList);
+
+                // Also follow per-season links (Сезон 1, Сезон 2, etc.)
+                // The main page only shows recent seasons inline; older seasons are on separate /sezon-N/ pages
+                const seasonLinks = $$('a[href*="/sezon-"]');
+                const seasonUrls = [];
+                seasonLinks.each((i, el) => {
+                    let href = $$(el).attr('href');
+                    if (!href) return;
+                    // Resolve relative URLs to absolute
+                    if (!href.startsWith('http')) {
+                        href = href.startsWith('/') ? BASE_URL + href : BASE_URL + '/' + href;
                     }
+                    if (href === contentUrl) return;
+                    if (seasonUrls.includes(href)) return;
+                    seasonUrls.push(href);
                 });
+
+                for (const seasonUrl of seasonUrls) {
+                    console.log(`[UAFlix] Fetching season page: ${seasonUrl}`);
+                    try {
+                        const seasonRes = await axios.get(seasonUrl, { headers: HEADERS, ...axiosConfig, ...(signal ? { signal } : {}) });
+                        const $s = cheerio.load(seasonRes.data);
+                        const before = allEpisodesList.length;
+                        parseEpisodes($s, episodesMap, allEpisodesList);
+                        const added = allEpisodesList.length - before;
+                        if (added > 0) console.log(`[UAFlix] Added ${added} episodes from ${seasonUrl}`);
+                    } catch (e) {
+                        console.error(`[UAFlix] Error fetching season page ${seasonUrl}: ${e.message}`);
+                    }
+                }
+
+                console.log(`[UAFlix] Total episodes collected: ${allEpisodesList.length} across ${Object.keys(episodesMap).length} seasons`);
 
                 const finalResult = [];
                 const ashdiSerialResult = [];
@@ -456,7 +497,7 @@ module.exports = {
                                         .map(ep => ({
                                             title: ep.title,
                                             file: `${host}/api/uaflix/stream/master.m3u8?url=${encodeURIComponent(ep.pageUrl)}&player=${i}`,
-                                            poster: vodPosters[`${ep.season}_${ep.episode}`] || vodPosters._global || ep.poster,
+                                            poster: ep.poster || vodPosters[`${ep.season}_${ep.episode}`] || vodPosters._global,
                                             season: ep.season,
                                             episode: ep.episode
                                         }));
@@ -546,7 +587,7 @@ module.exports = {
                                         .map(ep => ({
                                             title: ep.title,
                                             file: `${host}/api/uaflix/stream/master.m3u8?url=${encodeURIComponent(ep.pageUrl)}&player=0`,
-                                            poster: vodPosters[`${ep.season}_${ep.episode}`] || vodPosters._global || ep.poster,
+                                            poster: ep.poster || vodPosters[`${ep.season}_${ep.episode}`] || vodPosters._global,
                                             season: ep.season,
                                             episode: ep.episode
                                         }));
