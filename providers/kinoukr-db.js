@@ -56,7 +56,7 @@ const initPromise = (async () => {
         }
 
         console.log('[KinoUkrDB] Fetching kinoukr.json...');
-        const res = await axios.get(JSON_URL, { timeout: 60000, ...(signal ? { signal } : {}) });
+        const res = await axios.get(JSON_URL, { timeout: 60000 });
         const data = res.data;
         if (!data || typeof data !== 'object') throw new Error('Invalid JSON response — expected object');
 
