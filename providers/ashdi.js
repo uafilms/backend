@@ -195,23 +195,40 @@ function parsePlayer(html, fallbackTitle, fallbackPoster = null) {
 
 async function getLinksFromAshdiUrl(ashdiUrl, title, signal, fallbackPoster = null) {
     const axiosConfig = { ...proxyManager.getConfig('ashdi'), ...(signal ? { signal } : {}) };
-    try {
-        let url = normalizeUrl(ashdiUrl);
-        url = rewriteUrl(url, { media: false });
+    const fetchOpts = {
+        ...axiosConfig,
+        headers: {
+            ...NAV_HEADERS,
+            'Referer': 'https://kinoukr.tv/',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1'
+        },
+        timeout: 15000
+    };
+
+    const tryFetch = async (url) => {
         if (/\/vod\/\d+/i.test(url) && !url.includes('multivoice')) {
             url += (url.includes('?') ? '&' : '?') + 'multivoice';
         }
-        const html = (await axios.get(url, {
-            ...axiosConfig,
-            headers: {
-                ...NAV_HEADERS,
-                'Referer': 'https://kinoukr.tv/',
-                'Accept-Encoding': 'gzip, deflate, br',
-                'Connection': 'keep-alive',
-                'Upgrade-Insecure-Requests': '1'
-            },
-            timeout: 15000
-        })).data;
+        const res = await axios.get(url, fetchOpts);
+        return res.data;
+    };
+
+    try {
+        let url = normalizeUrl(ashdiUrl);
+        let html;
+
+        // Try proxy first, fall back to direct URL if geo-blocked
+        try {
+            url = rewriteUrl(url, { media: false });
+            html = await tryFetch(url);
+            if (!html || /недоступний|заблоковано/i.test(html)) throw new Error('geo-blocked');
+        } catch (_) {
+            url = normalizeUrl(ashdiUrl);
+            html = await tryFetch(url);
+        }
+
         return parsePlayer(html, title, fallbackPoster);
     } catch (e) {
         if (axios.isCancel(e)) return null;
