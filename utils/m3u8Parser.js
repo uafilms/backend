@@ -3,15 +3,25 @@ const { URL } = require('url');
 const CORS_PROXY = 'https://cors.bwa.workers.dev/';
 
 /**
- * Парсить m3u8:
- * - URL після #EXT-X-STREAM-INF (якісні плейлисти) → завжди проксуємо через /proxy/m3u8
- * - URL після #EXTINF (сегменти .ts/.mp4) → прямі абсолютні посилання
- * - Якщо прямі сегменти мають CORS проблеми → fallback через cors.bwa.workers.dev
+ * Якщо URL вже загорнутий у CORS_PROXY — повертає inner URL,
+ * інакше повертає оригінал.
  */
+function stripCorsProxy(url) {
+    const prefix = CORS_PROXY.replace(/\/+$/, '/');
+    while (url.startsWith(prefix)) {
+        url = url.slice(prefix.length);
+    }
+    return url;
+}
+
 function parseMasterPlaylist(content, baseUrl, proxyHost, options = {}) {
     const { corsProxySegments = false } = options;
     const lines = content.split('\n');
     const newLines = [];
+
+    // Нормалізуємо baseUrl — вирізаємо CORS_PROXY, щоб не резолвити
+    // відносні сегменти в уже проксований URL (призводить до подвійного проксі)
+    const cleanBaseUrl = stripCorsProxy(baseUrl);
 
     let nextIsStreamUrl = false; // після #EXT-X-STREAM-INF
     let nextIsSegmentUrl = false; // після #EXTINF або #EXT-X-BYTERANGE
@@ -36,7 +46,7 @@ function parseMasterPlaylist(content, baseUrl, proxyHost, options = {}) {
 
         // Це URL рядок
         try {
-            const absoluteUrl = new URL(trimmed, baseUrl).href;
+            const absoluteUrl = new URL(trimmed, cleanBaseUrl).href;
 
             if (nextIsStreamUrl) {
                 // Якісний плейлист — завжди проксуємо
@@ -44,7 +54,13 @@ function parseMasterPlaylist(content, baseUrl, proxyHost, options = {}) {
                 nextIsStreamUrl = false;
             } else if (nextIsSegmentUrl) {
                 // Сегмент — прямий URL або через CORS proxy якщо потрібно
-                newLines.push(corsProxySegments ? `${CORS_PROXY}${absoluteUrl}` : absoluteUrl);
+                // АЛЕ якщо URL вже містить CORS_PROXY (напр. через nested .m3u8),
+                // не загортаємо вдруге
+                if (corsProxySegments && !absoluteUrl.startsWith(CORS_PROXY)) {
+                    newLines.push(`${CORS_PROXY}${absoluteUrl}`);
+                } else {
+                    newLines.push(absoluteUrl);
+                }
                 nextIsSegmentUrl = false;
             } else {
                 // Невідомий контекст: проксуємо якщо схоже на плейлист, інакше прямий URL
@@ -55,7 +71,12 @@ function parseMasterPlaylist(content, baseUrl, proxyHost, options = {}) {
                 if (looksLikePlaylist) {
                     newLines.push(`${proxyHost}/proxy/m3u8?url=${encodeURIComponent(absoluteUrl)}`);
                 } else {
-                    newLines.push(corsProxySegments ? `${CORS_PROXY}${absoluteUrl}` : absoluteUrl);
+                    // Не загортаємо вдруге
+                    if (corsProxySegments && !absoluteUrl.startsWith(CORS_PROXY)) {
+                        newLines.push(`${CORS_PROXY}${absoluteUrl}`);
+                    } else {
+                        newLines.push(absoluteUrl);
+                    }
                 }
             }
         } catch (e) {

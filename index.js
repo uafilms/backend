@@ -1208,8 +1208,15 @@ app.get('/api/moonanime/webm.webm', checkTurnstile, async (req, res) => {
 
 app.get('/proxy/m3u8', checkTurnstile, async (req, res) => {
     try {
-        const { url } = req.query;
+        let url = req.query.url;
         if (!url) return res.status(400).send('URL required');
+
+        // Вирізаємо CORS_PROXY з URL, щоб уникнути подвійного проксування:
+        // якщо url вже містить cors.bwa.workers.dev — знімаємо цей шар
+        const CORS_PREFIX = 'https://cors.bwa.workers.dev/';
+        while (url.startsWith(CORS_PREFIX)) {
+            url = url.slice(CORS_PREFIX.length);
+        }
 
         const isMoonAnime = url.includes('moonanime.art') || url.includes('mooncdn.space') || url.includes('s.moonanime');
         const isAshdi = url.includes('ashdi.vip') || url.includes('ashdi.aartzz.pp.ua');
