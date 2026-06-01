@@ -13,14 +13,14 @@ const HEADERS = { 'User-Agent': UA };
 
 // ── Step 1: search ────────────────────────────────────────────────────────────
 
-async function search(query, axiosConfig) {
+async function search(query, axiosConfig, signal) {
     const params = new URLSearchParams({
         do: 'search', subaction: 'search', search_start: '0',
         full_search: '0', story: query,
     }).toString();
 
     const { data } = await axios.get(`${BASE}/index.php?${params}`, {
-        headers: HEADERS, timeout: 15000, ...axiosConfig,
+        headers: HEADERS, timeout: 15000, ...axiosConfig, ...(signal ? { signal } : {}),
     });
 
     const html = typeof data === 'string' ? data : '';
@@ -35,9 +35,9 @@ async function search(query, axiosConfig) {
 
 // ── Step 2: get HDVB iframe URLs from movie/series page ───────────────────────
 
-async function getVods(pageUrl, axiosConfig) {
+async function getVods(pageUrl, axiosConfig, signal) {
     const { data: body } = await axios.get(pageUrl, {
-        headers: HEADERS, timeout: 15000, ...axiosConfig,
+        headers: HEADERS, timeout: 15000, ...axiosConfig, ...(signal ? { signal } : {}),
     });
 
     const html = typeof body === 'string' ? body : '';
@@ -76,16 +76,17 @@ async function getVods(pageUrl, axiosConfig) {
 // ── Public API ────────────────────────────────────────────────────────────────
 
 module.exports = {
-    getLinks: async (title, originalTitle, year) => {
+    getLinks: async (title, originalTitle, year, signal) => {
+        console.log('[UaSerialsMy] Searching for:', title);
         const axiosConfig = proxyManager.getConfig('uaserials-my');
         try {
             // Step 1: search
             const query = title || originalTitle;
             if (!query) return null;
 
-            let results = await search(query, axiosConfig);
+            let results = await search(query, axiosConfig, signal);
             if (!results.length && originalTitle && originalTitle !== title) {
-                results = await search(originalTitle, axiosConfig);
+                results = await search(originalTitle, axiosConfig, signal);
             }
             if (!results.length) return null;
 
@@ -101,7 +102,7 @@ module.exports = {
             if (!target) return null;
 
             // Step 3: get VOD iframes
-            const iframes = await getVods(target.url, axiosConfig);
+            const iframes = await getVods(target.url, axiosConfig, signal);
             if (!iframes.length) return null;
 
             // Step 4: parse HDVB iframes using hdvb.js parser

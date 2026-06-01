@@ -6,8 +6,8 @@ const proxyManager = require('../utils/proxyManager');
  * Handles both simple file URLs and complex nested JSON arrays (for TV series).
  * Used by any site that embeds HDVB players (eneyida.tv, uaserials.my, etc.)
  */
-async function parseHdvbIframe(iframeSrc, referer) {
-    const axiosConfig = proxyManager.getConfig('hdvb');
+async function parseHdvbIframe(iframeSrc, referer, signal) {
+    const axiosConfig = { ...proxyManager.getConfig('hdvb'), ...(signal ? { signal } : {}) };
     try {
         const { data: html } = await axios.get(iframeSrc, {
             headers: { 'Referer': referer || '' },
@@ -108,6 +108,7 @@ async function parseHdvbIframe(iframeSrc, referer) {
 
         return null;
     } catch (e) {
+        if (axios.isCancel(e)) return null;
         console.error('[HDVB] parseHdvbIframe error:', e.message);
         return null;
     }

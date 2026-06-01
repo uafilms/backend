@@ -8,9 +8,10 @@ const { getLinksFromAshdiUrl, absoluteUrl, cleanTitle, extractYearFromText, NAV_
 const BASE_URL = 'https://klon.fun';
 const SEARCH_URL = `${BASE_URL}/engine/ajax/controller.php?mod=search`;
 
-async function fetchUserHash(axiosConfig) {
+async function fetchUserHash(axiosConfig, signal) {
     const { data: html } = await axios.get(BASE_URL + '/', {
         ...axiosConfig,
+        ...(signal ? { signal } : {}),
         headers: { ...NAV_HEADERS, 'Referer': BASE_URL + '/' },
         timeout: 15000
     });
@@ -19,12 +20,13 @@ async function fetchUserHash(axiosConfig) {
     return hash || null;
 }
 
-async function searchTitle(query, axiosConfig) {
-    const userHash = await fetchUserHash(axiosConfig);
+async function searchTitle(query, axiosConfig, signal) {
+    const userHash = await fetchUserHash(axiosConfig, signal);
     if (!userHash) return [];
     const form = new URLSearchParams({ query, skin: 'klontv', user_hash: userHash });
     const { data: html } = await axios.post(SEARCH_URL, form.toString(), {
         ...axiosConfig,
+        ...(signal ? { signal } : {}),
         headers: {
             ...NAV_HEADERS,
             'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
@@ -65,19 +67,20 @@ function scoreResult(item, fallbackTitle, year, imdbId) {
     return score;
 }
 
-async function findBestPostUrl(imdbId, fallbackTitle, year, axiosConfig) {
+async function findBestPostUrl(imdbId, fallbackTitle, year, axiosConfig, signal) {
     const query = (imdbId && /^tt\d+$/i.test(imdbId)) ? imdbId.trim() : (fallbackTitle || '').trim();
     if (!query) return null;
-    const results = await searchTitle(query, axiosConfig);
+    const results = await searchTitle(query, axiosConfig, signal);
     if (!results.length) return null;
     results.sort((a, b) => scoreResult(b, fallbackTitle, year, imdbId) - scoreResult(a, fallbackTitle, year, imdbId));
     return results[0]?.url || null;
 }
 
-async function getIframe(postUrl, axiosConfig) {
+async function getIframe(postUrl, axiosConfig, signal) {
     try {
         const { data: html } = await axios.get(postUrl, {
             ...axiosConfig,
+            ...(signal ? { signal } : {}),
             headers: { ...NAV_HEADERS, 'Referer': BASE_URL + '/' },
             timeout: 15000
         });
@@ -101,15 +104,17 @@ async function getIframe(postUrl, axiosConfig) {
 }
 
 module.exports = {
-    getLinks: async (imdbId, title, year) => {
+    getLinks: async (imdbId, title, year, signal) => {
+        console.log('[Klon] Searching for:', title, year);
         const axiosConfig = proxyManager.getConfig('klon');
         try {
-            const postUrl = await findBestPostUrl(imdbId, title, year, axiosConfig);
+            const postUrl = await findBestPostUrl(imdbId, title, year, axiosConfig, signal);
             if (!postUrl) return null;
-            const iframe = await getIframe(postUrl, axiosConfig);
+            const iframe = await getIframe(postUrl, axiosConfig, signal);
             if (!iframe) return null;
             const html = (await axios.get(iframe, {
                 ...axiosConfig,
+                ...(signal ? { signal } : {}),
                 headers: { 'User-Agent': BASE_HEADERS['User-Agent'] },
                 timeout: 15000
             })).data;

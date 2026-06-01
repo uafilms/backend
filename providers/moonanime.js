@@ -5,13 +5,15 @@ const API_KEY = '865fEF-E2e1Bc-2ca431-e6A150-780DFD-737C6B';
 const API_HOST = 'https://api.moonanime.art';
 
 module.exports = {
-    getLinks: async (imdb_id, title, year, host) => {
+    getLinks: async (imdb_id, title, year, host, signal) => {
+        console.log('[MoonAnime] Searching for:', title);
         const axiosConfig = proxyManager.getConfig('moonanime');
         try {
             const searchRes = await axios.get(`${API_HOST}/api/2.0/titles`, {
                 params: { api_key: API_KEY, imdbid: imdb_id, search: title },
                 headers: { 'origin': 'http://lampa.mx' },
-                ...axiosConfig
+                ...axiosConfig,
+                ...(signal ? { signal } : {})
             });
 
             const anime = (searchRes.data.anime_list || []).find(i => i.year == year) || searchRes.data.anime_list?.[0];
@@ -19,7 +21,8 @@ module.exports = {
 
             const videoRes = await axios.get(`${API_HOST}/api/2.0/title/${anime.id}/videos`, {
                 params: { api_key: API_KEY },
-                ...axiosConfig
+                ...axiosConfig,
+                ...(signal ? { signal } : {})
             });
 
             // Трансформація [ { "Studio": { "Season": [Episodes] } } ] -> [ { "title": "Studio", "folder": [...] } ]
@@ -53,6 +56,9 @@ module.exports = {
             if (playlist.length === 0) return null;
 
             return playlist;
-        } catch (e) { return null; }
+        } catch (e) {
+            if (axios.isCancel(e)) return null;
+            return null;
+        }
     }
 };

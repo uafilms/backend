@@ -8,7 +8,8 @@ const { parseHdvbIframe } = require('./hdvb');
 const BASE_URL = 'https://eneyida.tv';
 
 module.exports = {
-    getLinks: async (title, year) => {
+    getLinks: async (title, year, signal) => {
+        console.log('[Eneyida] Searching for:', title, year);
         const axiosConfig = proxyManager.getConfig('eneyida');
         try {
             const searchRes = await axios.post(`${BASE_URL}/index.php?do=search`,
@@ -16,7 +17,8 @@ module.exports = {
                 {
                     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
                     ...axiosConfig,
-                    timeout: 15000
+                    timeout: 15000,
+                    ...(signal ? { signal } : {})
                 }
             );
             const $ = cheerio.load(searchRes.data);
@@ -32,7 +34,7 @@ module.exports = {
             });
             if (!movieLink) return null;
 
-            const moviePage = await axios.get(movieLink, { ...axiosConfig, timeout: 15000 });
+            const moviePage = await axios.get(movieLink, { ...axiosConfig, timeout: 15000, ...(signal ? { signal } : {}) });
             const iframeSrc = moviePage.data.match(/src="(https?:\/\/[^\/]+\/[^\"]+\/[0-9]+)"/)?.[1];
             if (!iframeSrc) return null;
 
@@ -46,6 +48,7 @@ module.exports = {
             const result = Array.isArray(valid) ? valid : [valid];
             return { _routes: { hdvb: result } };
         } catch (e) {
+            if (axios.isCancel(e)) return null;
             console.error('[Eneyida] getLinks error:', e.message);
             return null;
         }

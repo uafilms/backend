@@ -17,11 +17,12 @@ const HEADERS = {
 
 // ── Step 1: get dle_login_hash from main page ─────────────────────────────────
 
-async function getDleHash(axiosConfig) {
+async function getDleHash(axiosConfig, signal) {
     const { data } = await axios.get(`${BASE}/main/`, {
         headers: HEADERS,
         timeout: 15000,
-        ...axiosConfig
+        ...axiosConfig,
+        ...(signal ? { signal } : {})
     });
 
     const hash = data.match(/dle_login_hash\s*=\s*'([^']+)'/)?.[1] ||
@@ -31,7 +32,7 @@ async function getDleHash(axiosConfig) {
 
 // ── Step 2: AJAX search ───────────────────────────────────────────────────────
 
-async function search(query, dleHash, axiosConfig) {
+async function search(query, dleHash, axiosConfig, signal) {
     const form = `story=${encodeURIComponent(query)}&dle_hash=${encodeURIComponent(dleHash)}&thisUrl=%2Fmain%2F`;
     const { data } = await axios.post(`${BASE}/engine/lazydev/dle_search/ajax.php`, form, {
         headers: {
@@ -42,7 +43,8 @@ async function search(query, dleHash, axiosConfig) {
             'Referer': `${BASE}/main/`
         },
         timeout: 15000,
-        ...axiosConfig
+        ...axiosConfig,
+        ...(signal ? { signal } : {})
     });
 
     // AJAX returns JSON with content field
@@ -93,11 +95,12 @@ function pickBestResult(results, title, year) {
 
 // ── Step 4: get VOD iframes from fplayer tabs-box ─────────────────────────────
 
-async function getVods(pageUrl, axiosConfig) {
+async function getVods(pageUrl, axiosConfig, signal) {
     const { data } = await axios.get(pageUrl, {
         headers: HEADERS,
         timeout: 15000,
-        ...axiosConfig
+        ...axiosConfig,
+        ...(signal ? { signal } : {})
     });
 
     const $ = cheerio.load(data);
@@ -136,19 +139,20 @@ async function getVods(pageUrl, axiosConfig) {
 // ── Public API ────────────────────────────────────────────────────────────────
 
 module.exports = {
-    getLinks: async (imdbId, title, year) => {
+    getLinks: async (imdbId, title, year, signal) => {
+        console.log('[KinoUkr] Searching for:', title);
         const axiosConfig = proxyManager.getConfig('kinoukr');
         try {
             // Step 1: get hash
-            const dleHash = await getDleHash(axiosConfig);
+            const dleHash = await getDleHash(axiosConfig, signal);
 
             // Step 2: search
             const query = (imdbId && /^tt\d+$/i.test(imdbId)) ? imdbId : (title || '');
             if (!query) return null;
 
-            let results = await search(query, dleHash, axiosConfig);
+            let results = await search(query, dleHash, axiosConfig, signal);
             if (!results.length && imdbId && title) {
-                results = await search(title, dleHash, axiosConfig);
+                results = await search(title, dleHash, axiosConfig, signal);
             }
             if (!results.length) return null;
 
@@ -157,7 +161,7 @@ module.exports = {
             if (!target) return null;
 
             // Step 4: get VODs and poster
-            const { vods, poster } = await getVods(target.url, axiosConfig);
+            const { vods, poster } = await getVods(target.url, axiosConfig, signal);
             if (!vods.length) return null;
 
             // Step 5: classify and parse
@@ -167,7 +171,7 @@ module.exports = {
             for (const vod of vods) {
                 if (/ashdi/i.test(vod.url)) {
                     try {
-                        const parsed = await getLinksFromAshdiUrl(vod.url, title || vod.label);
+                        const parsed = await getLinksFromAshdiUrl(vod.url, title || vod.label, signal);
                         if (parsed && Array.isArray(parsed) && parsed.length) {
                             // Let poster come from VOD source; TMDB backdrop used as fallback in embed
                             ashdiLinks.push(...parsed);
@@ -186,9 +190,8 @@ module.exports = {
             if (tortugaIframes.length) {
                 for (const vod of tortugaIframes) {
                     if (/tortuga\.tw\/embed\//i.test(vod.url)) {
-                        const parsed = await parseTortugaEmbed(vod.url);
+                        const parsed = await parseTortugaEmbed(vod.url, signal);
                         if (parsed && parsed.length) {
-                            // Add poster to each tortuga embed result
                             tortugaLinks.push(...parsed.map(season => ({
                                 ...season,
                                 folder: (season.folder || []).map(ep => ({
@@ -201,12 +204,12 @@ module.exports = {
                             })));
                         }
                     } else {
-                        const vodData = await parseTortugaVod(vod.url);
+                        const vodData = await parseTortugaVod(vod.url, signal);
                         if (vodData && vodData.file) {
                             tortugaLinks.push({ 
                                 title: vod.label || 'Tortuga', 
                                 file: vodData.file, 
-                                poster: vodData.poster || null // Let TMDB backdrop handle fallback
+                                poster: vodData.poster || null
                             });
                         }
                     }
