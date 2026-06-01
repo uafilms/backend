@@ -92,13 +92,18 @@ module.exports = {
 
             // Step 2: pick best match
             const normalizeStr = s => (s || '').trim().toLowerCase();
-            const target = results.find(r =>
-                normalizeStr(r.title) === normalizeStr(title) ||
-                (originalTitle && normalizeStr(r.oname) === normalizeStr(originalTitle))
-            ) || results.find(r =>
-                normalizeStr(r.title).includes(normalizeStr(title)) ||
-                (originalTitle && normalizeStr(r.oname).includes(normalizeStr(originalTitle)))
-            ) || results[0];
+            const target =
+                // 1) Exact title match (main page without season suffix)
+                results.find(r => normalizeStr(r.title) === normalizeStr(title)) ||
+                // 2) Exact original title match (oname)
+                results.find(r => originalTitle && normalizeStr(r.oname) === normalizeStr(originalTitle)) ||
+                // 3) Partial match
+                results.find(r =>
+                    normalizeStr(r.title).includes(normalizeStr(title)) ||
+                    (originalTitle && normalizeStr(r.oname).includes(normalizeStr(originalTitle)))
+                ) ||
+                // 4) Fallback to first
+                results[0];
             if (!target) return null;
 
             // Step 3: get VOD iframes
