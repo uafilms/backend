@@ -19,7 +19,9 @@ const wormhole = require('./providers/wormhole');
 const uatut = require('./providers/uatut');
 const eneyida = require('./providers/eneyida');
 const uafilmsMe = require('./providers/uafilms-me');
-
+const uakinoApp = require('./providers/uakino-app');
+const uakinoBest = require('./providers/uakino-best');
+const kinoukrDb = require('./providers/kinoukr-db');
 
 // Англомовні провайдери (CinemaOS видалено)
 const uembed = require('./providers/uembed');
@@ -32,6 +34,13 @@ const { parseUaKinoComments } = require('./utils/commentParser');
 const app = express();
 const cache = new NodeCache({ stdTTL: 3600 }); 
 const tokenCache = new NodeCache({ stdTTL: 7200, checkperiod: 600 });
+
+process.on('unhandledRejection', (reason) => {
+    console.error('[FATAL] Unhandled Rejection:', reason);
+});
+process.on('uncaughtException', (err) => {
+    console.error('[FATAL] Uncaught Exception:', err);
+});
 
 app.set('trust proxy', true);
 
@@ -246,6 +255,17 @@ async function extractUaflixM3u8(pageUrl, playerIndex = 0) {
     } catch (e) { console.error("Extract Uaflix Error:", e.message); return null; }
 }
 
+// Merge links from multiple providers that write to the same route key
+// (kinoukr and uafilmsMe both write to 'ashdi' — concatenate arrays to avoid episode loss)
+function mergeLinks(prev, next) {
+    if (prev === undefined || prev === null) return next;
+    if (next === undefined || next === null) return prev;
+    if (Array.isArray(prev) && Array.isArray(next)) {
+        return prev.concat(next);
+    }
+    return next;
+}
+
 function normalizeResponse(tmdbData, type, token = '', host = '') {
     const providers = {};
     const seasonsInfo = (type === 'tv' && tmdbData && tmdbData.seasons_info) ? tmdbData.seasons_info : null;
@@ -325,8 +345,8 @@ function normalizeResponse(tmdbData, type, token = '', host = '') {
                         finalUrl = `${host}/api/tortuga/proxy/master.m3u8?url=${encodeURIComponent(finalUrl)}`;
                         mimeType = 'application/x-mpegURL';
                     }
-                    // Route Ashdi m3u8 URLs through /proxy/m3u8 to avoid CORS
-                    if (providerName === 'ashdi' && (finalUrl.includes('.m3u8') || finalUrl.includes('ashdi.vip') || finalUrl.includes('ashdi.aartzz.pp.ua'))) {
+                    // Route Ashdi / uafilm.me m3u8 URLs through /proxy/m3u8 to avoid CORS
+                    if ((providerName === 'ashdi' || providerName === 'uafilmme') && (finalUrl.includes('.m3u8') || finalUrl.includes('ashdi.vip') || finalUrl.includes('ashdi.aartzz.pp.ua') || finalUrl.includes('uafilm.me'))) {
                         finalUrl = `${host}/proxy/m3u8?url=${encodeURIComponent(finalUrl)}`;
                         mimeType = 'application/x-mpegURL';
                     }
@@ -341,7 +361,10 @@ function normalizeResponse(tmdbData, type, token = '', host = '') {
                         url: finalUrl,
                         mime: mimeType,
                         subtitles: sourceSubtitles,
-                        poster: item.poster || null,
+                        // Prefer TMDB backdrop as poster (landscape, visually rich) over provider thumbnail
+                        poster: (tmdbData && tmdbData.backdrop_path)
+                            ? `https://image.tmdb.org/t/p/w1280${tmdbData.backdrop_path}`
+                            : (item.poster || null),
                         headers: item.headers || null,
                     };
                 };
@@ -423,117 +446,120 @@ async function getMetadata(id, type) {
 // kinoukr викликається окремо бо повертає І ashdi І tortuga одночасно
 const providerGroups = {
     ashdi: [
-        (m) => klon.getLinks(m.imdb_id, m.title, m.year),
-        (m) => wormhole.getLinks(m.imdb_id, m.title),
-        (m) => uatut.getLinks(m.imdb_id, m.title),
+        (m, h, s) => klon.getLinks(m.imdb_id, m.title, m.year, s),
+        (m, h, s) => wormhole.getLinks(m.imdb_id, m.title, s),
+        (m, h, s) => uatut.getLinks(m.imdb_id, m.title, s),
     ],
     hdvb: [
-        (m) => eneyida.getLinks(m.title, m.year),
-        (m) => uaserialsmy.getLinks(m.title, m.original_title, m.year),
+        (m, h, s) => eneyida.getLinks(m.title, m.year, s),
+        (m, h, s) => uaserialsmy.getLinks(m.title, m.original_title, m.year, s),
     ],
     tortuga: [
-        (m) => uaserialsCom.getLinks(m.title, m.original_title, m.year, m.type),
+        (m, h, s) => uaserialsCom.getLinks(m.title, m.original_title, m.year, m.type, s),
     ],
     uaflix: [
-        (m, h) => uaflix.getLinks(m.imdb_id, m.title, m.original_title, m.year, m.type, h),
+        (m, h, s) => uaflix.getLinks(m.imdb_id, m.title, m.original_title, m.year, m.type, h, s),
     ],
     moonanime: [
-        (m, h) => moonanime.getLinks(m.imdb_id, m.title, m.year, h),
+        (m, h, s) => moonanime.getLinks(m.imdb_id, m.title, m.year, h, s),
     ],
 };
 
 const engProviderGroups = {
     uembed: [
-        (m) => uembed.getLinks(m),
+        (m, h, s) => uembed.getLinks(m, s),
     ],
 };
 
-// Wrap any promise with a timeout — resolves null on expiry
-function withTimeout(promise, ms) {
-    return Promise.race([
-        promise,
-        new Promise(resolve => setTimeout(() => resolve(null), ms)),
-    ]);
-}
+// ── Smart CDN-aware provider orchestrator ─────────────────────────────────────
+// Each provider is classified by which CDN types it can return.
+// When ALL CDN types for a provider are already found by others → its HTTP
+// requests are aborted. Providers that can still contribute a missing CDN type
+// are allowed to continue.
 
-// RaceFirst: перший успішний результат перемагає, з загальним таймаутом
-function raceFirstGroup(tasks, metadata, host) {
-    const PROVIDER_TIMEOUT = 10_000; // 10s per group — prevents infinite hangs
-    return new Promise((resolve) => {
-        const controller = new AbortController();
-        const { signal } = controller;
-        let remaining = tasks.length;
-        let resolved = false;
-        if (remaining === 0) { resolve(null); return; }
-
-        const timer = setTimeout(() => {
-            if (!resolved) {
-                resolved = true;
-                controller.abort();
-                resolve(null);
-            }
-        }, PROVIDER_TIMEOUT);
-
-        const done = (result) => {
-            if (resolved) return;
-            clearTimeout(timer);
-            resolved = true;
-            controller.abort();
-            resolve(result);
-        };
-
-        tasks.forEach(task => {
-            task(metadata, host, signal)
-                .then(result => {
-                    if (resolved) return;
-                    if (result) {
-                        done(result);
-                    } else {
-                        remaining--;
-                        if (remaining === 0) done(null);
-                    }
-                })
-                .catch(() => {
-                    remaining--;
-                    if (remaining === 0) done(null);
-                });
-        });
-    });
-}
+const PROVIDER_CDN = {
+    // Standalone (multi-CDN providers)
+    '_kinoukrStandalone':  ['ashdi', 'tortuga'],
+    '_kinoukrDbStandalone':['ashdi', 'tortuga'],
+    '_uafilmsMeStandalone':['ashdi'],
+    '_uakinoAppStandalone':['ashdi'],
+    '_uakinoBestStandalone':['ashdi'],
+    // Groups — each task in group can contribute its group-name CDN
+    'ashdi':    ['ashdi'],
+    'hdvb':     ['hdvb'],
+    'tortuga':  ['tortuga'],
+    'uaflix':   ['uaflix', 'ashdi'],   // zetvideo + ashdi
+    'moonanime':['moonanime'],
+    'uembed':   ['uembed'],
+};
 
 async function getLinks(metadata, host, activeProviderGroups) {
     const results = {};
-    const promises = Object.entries(activeProviderGroups).map(async ([groupName, tasks]) => {
-        if (groupName === '_kinoukrStandalone' || groupName === '_uafilmsMeStandalone') {
-            // standalone providers — return _routes with multiple keys
+    const mainCtrl = new AbortController();
+    const TIMEOUT = 20_000;
+    const tasks = [];
+
+    // ── Helper: create a per-provider task with its own AbortController ──────
+    function addTask(name, cdns, fn) {
+        const ctrl = new AbortController();
+        // When main aborts (timeout/all-complete), also abort this task
+        mainCtrl.signal.addEventListener('abort', () => {
+            if (!ctrl.signal.aborted) ctrl.abort();
+        }, { once: true });
+
+        const promise = (async () => {
             try {
-                const result = await withTimeout(tasks(metadata, host), 10_000);
-                if (result && result._routes) {
-                    for (const [key, val] of Object.entries(result._routes)) {
-                        results[key] = val;
+                const result = await fn(metadata, host, ctrl.signal);
+                if (!result || ctrl.signal.aborted) return;
+
+                if (result._routes) {
+                    for (const [k, v] of Object.entries(result._routes))
+                        results[k] = mergeLinks(results[k], v);
+                } else if (Array.isArray(result)) {
+                    results.ashdi = mergeLinks(results.ashdi, result);
+                } else {
+                    // Single-type result — key by first CDN (the group name)
+                    results[cdns[0]] = mergeLinks(results[cdns[0]], result);
+                }
+
+                // ── Smart CDN abort ─────────────────────────────────────────
+                // After each merge, kill tasks whose ALL cdns are now covered
+                const found = new Set(Object.keys(results));
+                for (const t of tasks) {
+                    if (t.ctrl.signal.aborted) continue;
+                    if (t.cdns.every(c => found.has(c))) {
+                        t.ctrl.abort();
                     }
                 }
             } catch (e) {
-                console.error(`${groupName} failed:`, e.message);
+                if (!ctrl.signal.aborted) console.error(`${name}:`, e.message);
             }
-            return;
-        }
-        try {
-            const result = await raceFirstGroup(tasks, metadata, host);
-            if (!result) return;
-            // Unwrap _routes
-            if (result._routes) {
-                for (const [key, val] of Object.entries(result._routes)) {
-                    results[key] = val;
-                }
-            } else {
-                results[groupName] = result;
+        })();
+
+        tasks.push({ name, cdns, ctrl, promise });
+    }
+
+    // ── Register all tasks ─────────────────────────────────────────────────
+    for (const [name, value] of Object.entries(activeProviderGroups)) {
+        if (name.startsWith('_')) {
+            addTask(name, PROVIDER_CDN[name] || [name.replace('_', '')], value);
+        } else if (Array.isArray(value)) {
+            const cdns = PROVIDER_CDN[name] || [name];
+            for (const taskFn of value) {
+                addTask(name, cdns, (m, h, s) => taskFn(m, h, s));
             }
-        } catch (e) {
-            console.error(`Provider group ${groupName} failed:`, e.message);
         }
-    });
-    await Promise.all(promises);
+    }
+
+    if (tasks.length === 0) return null;
+
+    // ── Wait for all tasks or timeout ───────────────────────────────────────
+    await Promise.race([
+        Promise.all(tasks.map(t => t.promise.catch(() => {}))),
+        new Promise(r => setTimeout(r, TIMEOUT)),
+    ]);
+
+    mainCtrl.abort(); // mop up any remaining in-flight HTTP requests
     return Object.keys(results).length ? results : null;
 }
 
@@ -577,9 +603,16 @@ app.get('/api/get', checkTurnstile, async (req, res) => {
     else activeProviders = providerGroups;
     
     // kinoukr runs standalone (returns both ashdi and tortuga routes)
-    activeProviders._kinoukrStandalone = (m, h) => kinoukr.getLinks(m.imdb_id, m.title, m.year);
+    activeProviders._kinoukrStandalone = (m, h, s) => kinoukr.getLinks(m.imdb_id, m.title, m.year, s);
     // uafilmsMe runs standalone (returns routes keyed by origin: ashdi, etc.)
-    activeProviders._uafilmsMeStandalone = (m, h) => uafilmsMe.getLinks(m.imdb_id, m.title, m.year, h);
+    // uafilmsMe data merges via originToRoute into existing provider keys (ashdi), not as separate entry
+    activeProviders._uafilmsMeStandalone = (m, h, s) => uafilmsMe.getLinks(m.imdb_id, m.title, m.year, h, s);
+    // uakino runs standalone (fetches catalog, returns ashdi routes or playlist array)
+    activeProviders._uakinoAppStandalone = (m, h, s) => uakinoApp.getLinks(m.imdb_id, m.title, m.original_title, m.year, h, s);
+    // uakinoBest runs standalone (DLE search + playlist endpoint)
+    activeProviders._uakinoBestStandalone = (m, h, s) => uakinoBest.getLinks(m.imdb_id, m.title, m.original_title, m.year, h, s);
+    // kinoukrDb runs standalone (DB-backed ashdi + tortuga)
+    activeProviders._kinoukrDbStandalone = (m, h, s) => kinoukrDb.getLinks(m.imdb_id, m.title, m.original_title, m.year, s);
     
     const metaCacheKey = `meta_v4_${type}_${id}`;
     const fullCacheKey = `links_v5_${type}_${id}_eng${engMode}`;
@@ -627,95 +660,25 @@ app.get('/api/get', checkTurnstile, async (req, res) => {
             }
             
             const host = `${req.protocol}://${req.get('host')}`;
-            const allLinks = {};
             
-            // Standalone providers — run in parallel, return _routes (with timeout)
-            const STANDALONE_TIMEOUT = 10_000;
-            const kinoukrPromise = activeProviders._kinoukrStandalone
-                ? withTimeout(activeProviders._kinoukrStandalone(metaData, host), STANDALONE_TIMEOUT)
-                : Promise.resolve(null);
-            const uafilmsMePromise = activeProviders._uafilmsMeStandalone
-                ? withTimeout(activeProviders._uafilmsMeStandalone(metaData, host), STANDALONE_TIMEOUT)
-                : Promise.resolve(null);
+            // Use smart CDN-aware getLinks (all providers, collects ALL CDN types)
+            const allLinks = await getLinks(metaData, host, activeProviders);
             
-            const promises = Object.entries(activeProviders).map(async ([groupName, tasks]) => {
-                if (groupName === '_kinoukrStandalone' || groupName === '_uafilmsMeStandalone') return; // skip, handled separately
-                try {
-                    const result = await raceFirstGroup(tasks, metaData, host);
-                    if (!result) return;
-                    
-                    // Unwrap _routes
-                    const unwrapped = result._routes || { [groupName]: result };
-                    
-                    for (const [provName, provLinks] of Object.entries(unwrapped)) {
-                        allLinks[provName] = provLinks;
-                        
-                        // Normalize and send SSE for each provider IMMEDIATELY
-                        const chunkMeta = { ...metaData, links: { [provName]: provLinks } };
-                        const normalized = normalizeResponse(chunkMeta, type, token, host);
-                        const provData = normalized.providers[provName];
-                        if (provData) {
-                            const payload = { provider: provName };
-                            if (type === 'movie') payload.sources = provData;
-                            else payload.seasons = provData;
-                            console.log(`[SSE] Streaming provider: ${provName} at ${new Date().toISOString()}`);
-                            
-                            // CRITICAL: Write and flush immediately to prevent buffering
-                            const written = res.write(`data: ${JSON.stringify(payload)}\n\n`);
-                            console.log(`[SSE] Write result for ${provName}: ${written}`);
-                            
-                            // Force flush if available (compression middleware)
-                            if (typeof res.flush === 'function') {
-                                res.flush();
-                                console.log(`[SSE] Flushed ${provName}`);
-                            }
-                        }
+            if (allLinks) {
+                cache.set(fullCacheKey, { meta: metaData, links: allLinks }, 3600);
+                for (const [provName, provLinks] of Object.entries(allLinks)) {
+                    const chunkMeta = { ...metaData, links: { [provName]: provLinks } };
+                    const normalized = normalizeResponse(chunkMeta, type, token, host);
+                    const provData = normalized.providers[provName];
+                    if (provData) {
+                        const payload = { provider: provName };
+                        if (type === 'movie') payload.sources = provData;
+                        else payload.seasons = provData;
+                        res.write(`data: ${JSON.stringify(payload)}\n\n`);
+                        if (typeof res.flush === 'function') res.flush();
                     }
-                } catch (e) {
-                    console.error(`[SSE] Provider group ${groupName} failed:`, e.message);
                 }
-            });
-            
-            // Run standalone providers in parallel with other groups
-            const standaloneSSE = async (promise, label) => {
-                try {
-                    const result = await promise;
-                    if (result && result._routes) {
-                        for (const [provName, provLinks] of Object.entries(result._routes)) {
-                            allLinks[provName] = provLinks;
-                            
-                            const chunkMeta = { ...metaData, links: { [provName]: provLinks } };
-                            const normalized = normalizeResponse(chunkMeta, type, token, host);
-                            const provData = normalized.providers[provName];
-                            if (provData) {
-                                const payload = { provider: provName };
-                                if (type === 'movie') payload.sources = provData;
-                                else payload.seasons = provData;
-                                console.log(`[SSE] Streaming provider: ${provName} at ${new Date().toISOString()}`);
-                                
-                                const written = res.write(`data: ${JSON.stringify(payload)}\n\n`);
-                                if (typeof res.flush === 'function') res.flush();
-                            }
-                        }
-                    }
-                } catch (e) {
-                    console.error(`[SSE] ${label} failed:`, e.message);
-                }
-            };
-
-            const kinoukrTask = standaloneSSE(kinoukrPromise, 'kinoukr');
-            const uafilmsMeTask = standaloneSSE(uafilmsMePromise, 'uafilmsMe');
-            
-            // Wait for all providers to complete with a global timeout
-            const SSE_TIMEOUT = 15_000; // 15s — hard limit for the whole SSE request
-            const allProviderTasks = [...promises, kinoukrTask, uafilmsMeTask];
-            await Promise.race([
-                Promise.all(allProviderTasks),
-                new Promise(resolve => setTimeout(resolve, SSE_TIMEOUT)),
-            ]);
-            
-            // Cache the full result
-            cache.set(fullCacheKey, { meta: metaData, links: allLinks }, 3600);
+            }
             
             res.write('event: complete\ndata: done\n\n');
             return res.end();
@@ -762,8 +725,11 @@ app.get('/embed', checkTurnstile, async (req, res) => {
         activeProviders = providerGroups;
     }
     
-    activeProviders._kinoukrStandalone = (m, h) => kinoukr.getLinks(m.imdb_id, m.title, m.year);
-    activeProviders._uafilmsMeStandalone = (m, h) => uafilmsMe.getLinks(m.imdb_id, m.title, m.year, h);
+    activeProviders._kinoukrStandalone = (m, h, s) => kinoukr.getLinks(m.imdb_id, m.title, m.year, s);
+    activeProviders._uafilmsMeStandalone = (m, h, s) => uafilmsMe.getLinks(m.imdb_id, m.title, m.year, h, s);
+    activeProviders._uakinoAppStandalone = (m, h, s) => uakinoApp.getLinks(m.imdb_id, m.title, m.original_title, m.year, h, s);
+    activeProviders._uakinoBestStandalone = (m, h, s) => uakinoBest.getLinks(m.imdb_id, m.title, m.original_title, m.year, h, s);
+    activeProviders._kinoukrDbStandalone = (m, h, s) => kinoukrDb.getLinks(m.imdb_id, m.title, m.original_title, m.year, s);
 
     const fullCacheKey = `links_v5_${type}_${id}_eng${engMode}`;
     let cachedLinks = cache.get(fullCacheKey);
@@ -1227,6 +1193,7 @@ app.get('/proxy/m3u8', checkTurnstile, async (req, res) => {
 
         const isMoonAnime = url.includes('moonanime.art') || url.includes('mooncdn.space') || url.includes('s.moonanime');
         const isAshdi = url.includes('ashdi.vip') || url.includes('ashdi.aartzz.pp.ua');
+        const isUafilmMe = url.includes('uafilm.me');
         const headers = isMoonAnime ? {
             'User-Agent': MOON_VOD_HEADERS['user-agent'],
             'Origin': 'https://moonanime.art',
@@ -1241,6 +1208,11 @@ app.get('/proxy/m3u8', checkTurnstile, async (req, res) => {
             'Origin': 'https://ashdi.vip',
             'Referer': 'https://ashdi.vip/',
             'Accept': '*/*',
+        } : isUafilmMe ? {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Origin': 'https://uafilm.me',
+            'Referer': 'https://uafilm.me/',
+            'Accept': '*/*',
         } : {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
             'Accept': '*/*',
@@ -1251,7 +1223,7 @@ app.get('/proxy/m3u8', checkTurnstile, async (req, res) => {
         const proxyHost = `${protocol}://${host}`;
 
         const response = await axios.get(url, { headers });
-        const corsProxySegments = isMoonAnime || isAshdi;
+        const corsProxySegments = isMoonAnime || isAshdi || isUafilmMe;
         const modifiedM3u8 = parseMasterPlaylist(response.data, url, proxyHost, { corsProxySegments });
         res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
         res.send(modifiedM3u8);
