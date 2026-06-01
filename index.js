@@ -18,7 +18,6 @@ const klon = require('./providers/klon');
 const wormhole = require('./providers/wormhole');
 const uatut = require('./providers/uatut');
 const eneyida = require('./providers/eneyida');
-const uafilmsMe = require('./providers/uafilms-me');
 const uakinoApp = require('./providers/uakino-app');
 const uakinoBest = require('./providers/uakino-best');
 const kinoukrDb = require('./providers/kinoukr-db');
@@ -256,7 +255,6 @@ async function extractUaflixM3u8(pageUrl, playerIndex = 0) {
 }
 
 // Merge links from multiple providers that write to the same route key
-// (kinoukr and uafilmsMe both write to 'ashdi' — concatenate arrays to avoid episode loss)
 function mergeLinks(prev, next) {
     if (prev === undefined || prev === null) return next;
     if (next === undefined || next === null) return prev;
@@ -350,8 +348,8 @@ function normalizeResponse(tmdbData, type, token = '', host = '') {
                         finalUrl = `${host}/api/tortuga/proxy/master.m3u8?url=${encodeURIComponent(finalUrl)}`;
                         mimeType = 'application/x-mpegURL';
                     }
-                    // Route Ashdi / uafilm.me m3u8 URLs through /proxy/m3u8 to avoid CORS
-                    if ((providerName === 'ashdi' || providerName === 'uafilmme') && finalUrl.includes('.m3u8')) {
+                    // Route Ashdi m3u8 URLs through /proxy/m3u8 to avoid CORS
+                    if (providerName === 'ashdi' && finalUrl.includes('.m3u8')) {
                         finalUrl = `${host}/proxy/m3u8?url=${encodeURIComponent(finalUrl)}`;
                         mimeType = 'application/x-mpegURL';
                     }
@@ -366,9 +364,7 @@ function normalizeResponse(tmdbData, type, token = '', host = '') {
                         url: finalUrl,
                         mime: mimeType,
                         subtitles: sourceSubtitles,
-                        poster: (tmdbData && tmdbData.backdrop_path)
-                            ? `https://image.tmdb.org/t/p/w1280${tmdbData.backdrop_path}`
-                            : (item.poster || null),
+                        poster: item.poster || (tmdbData && tmdbData.backdrop_path && `https://image.tmdb.org/t/p/w1280${tmdbData.backdrop_path}`) || null,
                         headers: item.headers || null,
                     };
                 };
@@ -489,7 +485,6 @@ const PROVIDER_CDN = {
     // Standalone (multi-CDN providers)
     '_kinoukrStandalone':  ['ashdi', 'tortuga'],
     '_kinoukrDbStandalone':['ashdi', 'tortuga'],
-    '_uafilmsMeStandalone':['ashdi'],
     '_uakinoAppStandalone':['ashdi'],
     '_uakinoBestStandalone':['ashdi'],
     // Groups — each task in group can contribute its group-name CDN
@@ -501,7 +496,7 @@ const PROVIDER_CDN = {
     'uembed':   ['uembed'],
 };
 
-async function getLinks(metadata, host, activeProviderGroups) {
+async function getLinks(metadata, host, activeProviderGroups, onResult) {
     const results = {};
     const mainCtrl = new AbortController();
     const TIMEOUT = 20_000;
@@ -519,6 +514,17 @@ async function getLinks(metadata, host, activeProviderGroups) {
             try {
                 const result = await fn(metadata, host, ctrl.signal);
                 if (!result || ctrl.signal.aborted) return;
+
+                // ── Stream result immediately via callback ─────────────────
+                if (onResult) {
+                    if (result._routes) {
+                        onResult(result._routes);
+                    } else if (Array.isArray(result)) {
+                        onResult({ ashdi: result });
+                    } else {
+                        onResult({ [cdns[0]]: result });
+                    }
+                }
 
                 if (result._routes) {
                     for (const [k, v] of Object.entries(result._routes))
@@ -612,9 +618,6 @@ app.get('/api/get', checkTurnstile, async (req, res) => {
     
     // kinoukr runs standalone (returns both ashdi and tortuga routes)
     activeProviders._kinoukrStandalone = (m, h, s) => kinoukr.getLinks(m.imdb_id, m.title, m.year, s);
-    // uafilmsMe runs standalone (returns routes keyed by origin: ashdi, etc.)
-    // uafilmsMe data merges via originToRoute into existing provider keys (ashdi), not as separate entry
-    activeProviders._uafilmsMeStandalone = (m, h, s) => uafilmsMe.getLinks(m.imdb_id, m.title, m.year, h, s);
     // uakino runs standalone (fetches catalog, returns ashdi routes or playlist array)
     activeProviders._uakinoAppStandalone = (m, h, s) => uakinoApp.getLinks(m.imdb_id, m.title, m.original_title, m.year, h, s);
     // uakinoBest runs standalone (DLE search + playlist endpoint)
@@ -640,7 +643,7 @@ app.get('/api/get', checkTurnstile, async (req, res) => {
                 const host = `${req.protocol}://${req.get('host')}`;
                 const normalized = normalizeResponse({ ...cachedLinks.meta, links: cachedLinks.links }, type, token, host);
                 
-                // Stream cached providers with delay to simulate progressive loading
+                // Stream providers with delay to simulate progressive loading
                 const providerEntries = Object.entries(normalized.providers);
                 for (let i = 0; i < providerEntries.length; i++) {
                     const [provName, provData] = providerEntries[i];
@@ -669,14 +672,9 @@ app.get('/api/get', checkTurnstile, async (req, res) => {
             
             const host = `${req.protocol}://${req.get('host')}`;
             
-            // Use smart CDN-aware getLinks (all providers, collects ALL CDN types)
-            const allLinks = await getLinks(metaData, host, activeProviders);
-            
-            if (allLinks) {
-                cache.set(fullCacheKey, { meta: metaData, links: allLinks }, 3600);
-                const providerEntries = Object.entries(allLinks);
-                for (let i = 0; i < providerEntries.length; i++) {
-                    const [provName, provLinks] = providerEntries[i];
+            // Stream each provider immediately as discovered (true streaming)
+            const onProviderResult = (providerData) => {
+                for (const [provName, provLinks] of Object.entries(providerData)) {
                     const chunkMeta = { ...metaData, links: { [provName]: provLinks } };
                     const normalized = normalizeResponse(chunkMeta, type, token, host);
                     const provData = normalized.providers[provName];
@@ -687,11 +685,20 @@ app.get('/api/get', checkTurnstile, async (req, res) => {
                         res.write(`data: ${JSON.stringify(payload)}\n\n`);
                         if (typeof res.flush === 'function') res.flush();
                     }
-                    // Small delay between providers so the client gets SSE events one by one
-                    if (i < providerEntries.length - 1) {
-                        await new Promise(resolve => setTimeout(resolve, 50));
-                    }
                 }
+                // Cache incrementally so /embed can use immediately
+                const existing = cache.get(fullCacheKey) || { meta: metaData, links: {} };
+                for (const [k, v] of Object.entries(providerData)) {
+                    existing.links[k] = mergeLinks(existing.links[k], v);
+                }
+                cache.set(fullCacheKey, existing, 3600);
+            };
+
+            // Use smart CDN-aware getLinks with streaming callback
+            const allLinks = await getLinks(metaData, host, activeProviders, onProviderResult);
+
+            if (allLinks) {
+                cache.set(fullCacheKey, { meta: metaData, links: allLinks }, 3600);
             }
             
             res.write('event: complete\ndata: done\n\n');
@@ -740,7 +747,6 @@ app.get('/embed', checkTurnstile, async (req, res) => {
     }
     
     activeProviders._kinoukrStandalone = (m, h, s) => kinoukr.getLinks(m.imdb_id, m.title, m.year, s);
-    activeProviders._uafilmsMeStandalone = (m, h, s) => uafilmsMe.getLinks(m.imdb_id, m.title, m.year, h, s);
     activeProviders._uakinoAppStandalone = (m, h, s) => uakinoApp.getLinks(m.imdb_id, m.title, m.original_title, m.year, h, s);
     activeProviders._uakinoBestStandalone = (m, h, s) => uakinoBest.getLinks(m.imdb_id, m.title, m.original_title, m.year, h, s);
     activeProviders._kinoukrDbStandalone = (m, h, s) => kinoukrDb.getLinks(m.imdb_id, m.title, m.original_title, m.year, s);
