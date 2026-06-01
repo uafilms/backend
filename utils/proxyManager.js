@@ -12,7 +12,7 @@ const agents = proxyUrls.map(url => {
     }
 }).filter(a => a !== null);
 
-// Provider whitelist via env: PROXIED_PROVIDERS=ashdi,hdvb,uafilms-me
+// Provider whitelist via env: PROXIED_PROVIDERS=ashdi,hdvb
 // Special value "*" enables proxy for all providers.
 // If var is not set, falls back to the legacy default for backward compatibility.
 const rawList = (process.env.PROXIED_PROVIDERS ?? 'ashdi,tortuga,uaflix')
