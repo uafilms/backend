@@ -330,8 +330,13 @@ function normalizeResponse(tmdbData, type, token = '', host = '') {
                 }
                 
                 const createSourceObj = (url) => {
+                    // Skip non-media page URLs (e.g., ashdi /vod/ or /serial/ HTML pages)
+                    if (!url.includes('.m3u8') && !url.includes('.mp4') && !url.includes('.webm') && !url.includes('.mkv') &&
+                        (url.includes('/vod/') || url.includes('/serial/'))) {
+                        return null;
+                    }
                     let mimeType = 'video/mp4';
-                    if (url.includes('.m3u8') || providerName === 'ashdi' || providerName === 'uaflix' || providerName === 'uembed') {
+                    if (url.includes('.m3u8') || providerName === 'uaflix' || providerName === 'uembed') {
                         mimeType = 'application/x-mpegURL';
                     } else if (url.includes('.webm')) {
                         mimeType = 'video/webm';
@@ -346,7 +351,7 @@ function normalizeResponse(tmdbData, type, token = '', host = '') {
                         mimeType = 'application/x-mpegURL';
                     }
                     // Route Ashdi / uafilm.me m3u8 URLs through /proxy/m3u8 to avoid CORS
-                    if ((providerName === 'ashdi' || providerName === 'uafilmme') && (finalUrl.includes('.m3u8') || finalUrl.includes('ashdi.vip') || finalUrl.includes('ashdi.aartzz.pp.ua') || finalUrl.includes('uafilm.me'))) {
+                    if ((providerName === 'ashdi' || providerName === 'uafilmme') && finalUrl.includes('.m3u8')) {
                         finalUrl = `${host}/proxy/m3u8?url=${encodeURIComponent(finalUrl)}`;
                         mimeType = 'application/x-mpegURL';
                     }
@@ -361,7 +366,6 @@ function normalizeResponse(tmdbData, type, token = '', host = '') {
                         url: finalUrl,
                         mime: mimeType,
                         subtitles: sourceSubtitles,
-                        // Prefer TMDB backdrop as poster (landscape, visually rich) over provider thumbnail
                         poster: (tmdbData && tmdbData.backdrop_path)
                             ? `https://image.tmdb.org/t/p/w1280${tmdbData.backdrop_path}`
                             : (item.poster || null),
@@ -376,21 +380,25 @@ function normalizeResponse(tmdbData, type, token = '', host = '') {
                         const m = part.match(/\[(.*?)\](.*)/);
                         if (m) {
                             const srcObj = createSourceObj(m[2]);
-                            if (type === 'movie') addMovieSource(providerName, srcObj);
-                            else addEpisodeSource(providerName, s, e, srcObj);
+                            if (srcObj) {
+                                if (type === 'movie') addMovieSource(providerName, srcObj);
+                                else addEpisodeSource(providerName, s, e, srcObj);
+                            }
                         }
                     });
                 } else {
                     const srcObj = createSourceObj(url);
-                    if (type === 'movie') {
-                        addMovieSource(providerName, srcObj);
-                    } else {
-                        if (!e) {
-                            const fileTitleMatch = rawTitle.match(/(?:episode|серія|ep|e)\s*(\d+)/i) || rawTitle.match(/(\d+)\s*(?:episode|серія)/i);
-                            if (fileTitleMatch) e = parseInt(fileTitleMatch[1]);
-                            else e = items.indexOf(item) + 1;
+                    if (srcObj) {
+                        if (type === 'movie') {
+                            addMovieSource(providerName, srcObj);
+                        } else {
+                            if (!e) {
+                                const fileTitleMatch = rawTitle.match(/(?:episode|серія|ep|e)\s*(\d+)/i) || rawTitle.match(/(\d+)\s*(?:episode|серія)/i);
+                                if (fileTitleMatch) e = parseInt(fileTitleMatch[1]);
+                                else e = items.indexOf(item) + 1;
+                            }
+                            addEpisodeSource(providerName, s, e, srcObj);
                         }
-                        addEpisodeSource(providerName, s, e, srcObj);
                     }
                 }
             }
@@ -666,7 +674,9 @@ app.get('/api/get', checkTurnstile, async (req, res) => {
             
             if (allLinks) {
                 cache.set(fullCacheKey, { meta: metaData, links: allLinks }, 3600);
-                for (const [provName, provLinks] of Object.entries(allLinks)) {
+                const providerEntries = Object.entries(allLinks);
+                for (let i = 0; i < providerEntries.length; i++) {
+                    const [provName, provLinks] = providerEntries[i];
                     const chunkMeta = { ...metaData, links: { [provName]: provLinks } };
                     const normalized = normalizeResponse(chunkMeta, type, token, host);
                     const provData = normalized.providers[provName];
@@ -676,6 +686,10 @@ app.get('/api/get', checkTurnstile, async (req, res) => {
                         else payload.seasons = provData;
                         res.write(`data: ${JSON.stringify(payload)}\n\n`);
                         if (typeof res.flush === 'function') res.flush();
+                    }
+                    // Small delay between providers so the client gets SSE events one by one
+                    if (i < providerEntries.length - 1) {
+                        await new Promise(resolve => setTimeout(resolve, 50));
                     }
                 }
             }
