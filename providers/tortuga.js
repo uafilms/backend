@@ -27,7 +27,6 @@ function decodeTortugaFile(encoded) {
 
 const HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-    'Referer': 'https://tortuga.tw/'
 };
 
 // Parse movie VOD page → returns {file: m3u8URL, poster: posterURL}
