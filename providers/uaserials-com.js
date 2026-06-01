@@ -28,70 +28,119 @@ function aesDecrypt(passphrase, jsonStr) {
     return decrypted;
 }
 
-// ── Step 1: extract passphrase from player.min.js (uses eval for obfuscation) ─
+// ── Module-level passphrase cache ─────────────────────────────────────────────
 
-async function getPassphrase(axiosConfig) {
-    const { data: d } = await axios.get(
-        `${BASE}/templates/uaserials2020/js/player.min.js?v4`,
-        { headers: HEADERS, timeout: 15000, ...axiosConfig }
-    );
+let _passphraseCache = null;
 
-    // Find the dd= assignment pattern: var dd=OBFUSCATED_CALL+'12';
-    const ddMatch = d.match(/var dd=([^;]+);/);
-    if (!ddMatch) throw new Error('[UaSerialsCom] dd assignment not found in player.min.js');
+// ── Step 1: extract passphrase from page JS files ────────────────────────────
+// The passphrase was in player.min.js but is now in a hashed filename.
+// We auto-discover it by scanning all JS scripts loaded on the page.
 
-    // Extract the obfuscated call: e.g. _0x427b34(-0xc3,-0x12a,-0xf7)+'12'
-    const callMatch = ddMatch[1].match(/(_0x\w+)\(([-\w.,x]+)\)\+'(\d+)'/);
-    if (!callMatch) throw new Error('[UaSerialsCom] Cannot parse dd expression: ' + ddMatch[1]);
+async function getPassphrase(axiosConfig, signal) {
+    if (_passphraseCache) return _passphraseCache;
 
-    const [, funcName, argsStr, suffix] = callMatch;
+    // Fetch homepage to discover which JS files are loaded
+    const { data: html } = await axios.get(BASE + '/', {
+        headers: HEADERS,
+        timeout: 15000,
+        ...axiosConfig,
+        ...(signal ? { signal } : {}),
+    });
 
-    // Find the helper function (e.g. _0x427b34) which calls _0x3514
-    const helperStart = d.indexOf(`function ${funcName}(`);
-    if (helperStart === -1) throw new Error(`[UaSerialsCom] Helper function ${funcName} not found`);
-
-    // Brace-count to find function end
-    let hDepth = 0, hEnd = helperStart;
-    for (; hEnd < d.length; hEnd++) {
-        if (d[hEnd] === '{') hDepth++;
-        if (d[hEnd] === '}') { hDepth--; if (hDepth === 0) break; }
+    // Extract all <script src="..."> URLs pointing to .js files
+    const scriptSrcs = [];
+    const srcRe = /<script[^>]+src="([^"]+\.js[^"]*)"/g;
+    let m;
+    while ((m = srcRe.exec(html))) {
+        const url = m[1].startsWith('http') ? m[1] :
+            (m[1].startsWith('/') ? `${BASE}${m[1]}` : `${BASE}/${m[1]}`);
+        scriptSrcs.push(url);
     }
 
-    // Extract _0xb9bf, the shuffler IIFE, _0x3514, and the helper
-    const b9bfStart = d.indexOf('function _0xb9bf()');
-    const b9bfEnd = d.indexOf('return _0xb9bf();}', b9bfStart) + 'return _0xb9bf();}'.length;
-    const b9bf = d.substring(b9bfStart, b9bfEnd);
+    console.log('[UaSerialsCom] Scanning', scriptSrcs.length, 'JS files for passphrase');
 
-    // Shuffler IIFE ends with )(_0xb9bf, NUMBER);
-    const shufflerCloseIdx = d.indexOf(')(_0xb9bf,');
-    let depth = 1;
-    let i = shufflerCloseIdx + ')(_0xb9bf,'.length;
-    while (i < d.length && depth > 0) {
-        if (d[i] === '(') depth++;
-        if (d[i] === ')') depth--;
-        i++;
+    // Scan each JS file for var dd=... pattern
+    for (const url of scriptSrcs) {
+        try {
+            const { data: js } = await axios.get(url, {
+                headers: HEADERS,
+                timeout: 10000,
+                ...axiosConfig,
+                ...(signal ? { signal } : {}),
+            });
+
+            const ddMatch = js.match(/var dd=([^;]+);/);
+            if (!ddMatch) continue;
+
+            const expr = ddMatch[1].trim();
+            console.log('[UaSerialsCom] Found dd= in', url.substring(url.lastIndexOf('/') + 1));
+
+            // Case 1: Simple string concatenation: 'ABC'+'DEF'+'12'
+            const strMatch = expr.match(/^'([^']*)'(?:\+'([^']*)')*$/);
+            if (strMatch) {
+                const passphrase = expr.replace(/'/g, '').split('+').join('');
+                console.log('[UaSerialsCom] Passphrase extracted (string concat)');
+                _passphraseCache = passphrase;
+                return passphrase;
+            }
+
+            // Case 2: Obfuscated function call: _0x...(...)+'12'
+            // Full eval-based extraction kept for compatibility
+            const callMatch = expr.match(/(_0x\w+)\(([-\w.,x]+)\)\+'(\d+)'/);
+            if (callMatch) {
+                const [, funcName, argsStr, suffix] = callMatch;
+
+                const helperStart = js.indexOf(`function ${funcName}(`);
+                if (helperStart === -1) continue;
+
+                let hDepth = 0, hEnd = helperStart;
+                for (; hEnd < js.length; hEnd++) {
+                    if (js[hEnd] === '{') hDepth++;
+                    if (js[hEnd] === '}') { hDepth--; if (hDepth === 0) break; }
+                }
+
+                const b9bfStart = js.indexOf('function _0xb9bf()');
+                const b9bfEnd = js.indexOf('return _0xb9bf();}', b9bfStart) + 'return _0xb9bf();}'.length;
+                const b9bf = js.substring(b9bfStart, b9bfEnd);
+
+                const shufflerCloseIdx = js.indexOf(')(_0xb9bf,');
+                let depth = 1;
+                let i = shufflerCloseIdx + ')(_0xb9bf,'.length;
+                while (i < js.length && depth > 0) {
+                    if (js[i] === '(') depth++;
+                    if (js[i] === ')') depth--;
+                    i++;
+                }
+                const shuffler = js.substring(0, i + 1);
+
+                const x3514Start = js.indexOf('function _0x3514(');
+                const x3514End = js.indexOf('return _0x2439bb;}', x3514Start) + 'return _0x2439bb;}'.length;
+                const x3514 = js.substring(x3514Start, x3514End);
+
+                const helper = js.substring(helperStart, hEnd + 1);
+
+                const code = `${b9bf}\n${shuffler}\n${x3514}\n${helper}\n` +
+                    `RESULT = ${funcName}(${argsStr}) + '${suffix}';`;
+
+                let RESULT;
+                eval(code);
+                console.log('[UaSerialsCom] Passphrase extracted (eval)');
+                _passphraseCache = RESULT;
+                return RESULT;
+            }
+
+            console.log('[UaSerialsCom] Unknown dd= pattern in', url, ':', expr.substring(0, 50));
+        } catch (e) {
+            // skip files that fail to load
+        }
     }
-    const shuffler = d.substring(0, i + 1);
 
-    // _0x3514 decoder
-    const x3514Start = d.indexOf('function _0x3514(');
-    const x3514End = d.indexOf('return _0x2439bb;}', x3514Start) + 'return _0x2439bb;}'.length;
-    const x3514 = d.substring(x3514Start, x3514End);
-
-    const helper = d.substring(helperStart, hEnd + 1);
-
-    // Evaluate to extract the passphrase (eval is required for obfuscation)
-    const code = `${b9bf}\n${shuffler}\n${x3514}\n${helper}\n` +
-        `RESULT = ${funcName}(${argsStr}) + '${suffix}';`;
-
-    let RESULT;
-    eval(code); // eslint-disable-line no-eval
-    return RESULT;
+    throw new Error('[UaSerialsCom] Passphrase not found in any page JS file');
 }
 
 // ── Step 2: search ────────────────────────────────────────────────────────────
 
-async function search(query, axiosConfig) {
+async function search(query, axiosConfig, signal) {
     const payload = new URLSearchParams({
         do: 'search',
         subaction: 'search',
@@ -112,26 +161,46 @@ async function search(query, axiosConfig) {
             },
             timeout: 15000,
             ...axiosConfig,
+            ...(signal ? { signal } : {}),
         }
     );
 
     const html = typeof data === 'string' ? data : '';
+    const $ = cheerio.load(html);
     const results = [];
-    const re = /<a class="short-img[^"]*" href="([^"]+)"[\s\S]*?<div class="th-title[^"]*"[^>]*>([^<]+)<\/div>\s*<div class="th-title-oname[^"]*"[^>]*>([^<]+)<\/div>/g;
-    let m;
-    while ((m = re.exec(html))) {
-        results.push({ url: m[1], title: m[2].trim(), oname: m[3].trim() });
+
+    // New site design: search results use uas-card structure
+    $('a.uas-card[data-uas-type="post"]').each((i, el) => {
+        const href = $(el).attr('href');
+        const title = $(el).find('.uas-card__title').text().trim();
+        const oname = $(el).find('.uas-card__orig').text().trim();
+        if (href && title) {
+            // href can be absolute or relative
+            const url = href.startsWith('http') ? href : `${BASE}${href}`;
+            results.push({ url, title, oname });
+        }
+    });
+
+    // Fallback: old design with short-img/th-title classes
+    if (!results.length) {
+        const re = /<a class="short-img[^"]*" href="([^"]+)"[\s\S]*?<div class="th-title[^"]*"[^>]*>([^<]+)<\/div>\s*<div class="th-title-oname[^"]*"[^>]*>([^<]+)<\/div>/g;
+        let m;
+        while ((m = re.exec(html))) {
+            results.push({ url: m[1], title: m[2].trim(), oname: m[3].trim() });
+        }
     }
+
     return results;
 }
 
 // ── Step 3: get VODs (decrypt data-tag attributes) ────────────────────────────
 
-async function getVods(pageUrl, passphrase, axiosConfig) {
+async function getVods(pageUrl, passphrase, axiosConfig, signal) {
     const { data: body } = await axios.get(pageUrl, {
         headers: HEADERS,
         timeout: 15000,
         ...axiosConfig,
+        ...(signal ? { signal } : {}),
     });
 
     const html = typeof body === 'string' ? body : '';
@@ -187,24 +256,25 @@ function pickBestResult(results, title, originalTitle, year) {
 // ── Public API ────────────────────────────────────────────────────────────────
 
 module.exports = {
-    getLinks: async (title, originalTitle, year, type) => {
+    getLinks: async (title, originalTitle, year, type, signal) => {
+        console.log('[UaSerialsCom] Searching for:', title);
         // Only process movies — TV series return VOD URLs we can't play
         if (type && type === 'tv') return null;
         
         const axiosConfig = proxyManager.getConfig('uaserials-com');
         try {
             // Step 1: get passphrase
-            const passphrase = await getPassphrase(axiosConfig);
+            const passphrase = await getPassphrase(axiosConfig, signal);
 
             // Step 2: search
             const query = title || originalTitle;
             if (!query) return null;
 
-            let results = await search(query, axiosConfig);
+            let results = await search(query, axiosConfig, signal);
 
             // Fallback: try original title
             if (!results.length && originalTitle && originalTitle !== title) {
-                results = await search(originalTitle, axiosConfig);
+                results = await search(originalTitle, axiosConfig, signal);
             }
 
             if (!results.length) return null;
@@ -214,11 +284,11 @@ module.exports = {
             if (!target) return null;
 
             // Step 4: get VODs
-            const players = await getVods(target.url, passphrase, axiosConfig);
+            const players = await getVods(target.url, passphrase, axiosConfig, signal);
             if (!players.length) return null;
 
             // Step 5: transform to folder/file format using tortuga.js
-            const result = await transformTortugaPlayers(players);
+            const result = await transformTortugaPlayers(players, signal);
             if (!result) return null;
             return result;
         } catch (e) {
