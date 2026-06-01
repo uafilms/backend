@@ -26,3 +26,5 @@ dist-ssr
 tokens.json
 
 .env
+# SQLite caches
+cache/
