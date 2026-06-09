@@ -165,30 +165,34 @@ module.exports = {
             console.log('[KinoUkrDB] Matched:', row.title, `(${row.eng_name})`);
 
             const routes = {};
+            const fetches = [];
 
             // ── Ashdi ────────────────────────────────────────────────────────
             if (row.ashdi_path) {
                 const ashdiUrl = `${ASHDI_BASE}/${row.ashdi_path}`;
                 console.log('[KinoUkrDB] Ashdi URL:', ashdiUrl);
-                try {
-                    const parsed = await getLinksFromAshdiUrl(ashdiUrl, title || row.title, signal);
-                    if (parsed && Array.isArray(parsed) && parsed.length) {
-                        routes.ashdi = parsed;
-                    }
-                } catch (e) {
-                    console.error('[KinoUkrDB] Ashdi error:', e.message);
-                }
+                fetches.push(
+                    getLinksFromAshdiUrl(ashdiUrl, title || row.title)
+                        .then(parsed => {
+                            if (parsed && Array.isArray(parsed) && parsed.length) {
+                                routes.ashdi = parsed;
+                            }
+                        })
+                        .catch(e => console.error('[KinoUkrDB] Ashdi error:', e.message))
+                );
             }
 
             // ── Tortuga ──────────────────────────────────────────────────────
             if (row.tortuga_path) {
                 const tortugaUrl = `${TORTUGA_BASE}/${row.tortuga_path}`;
                 console.log('[KinoUkrDB] Tortuga URL:', tortugaUrl);
-                try {
-                    if (row.tortuga_path.startsWith('embed/')) {
-                        const parsed = await parseTortugaEmbed(tortugaUrl, signal);
-                        if (parsed && parsed.length) {
-                            routes.tortuga = parsed.map(season => ({
+                fetches.push(
+                    (row.tortuga_path.startsWith('embed/')
+                        ? parseTortugaEmbed(tortugaUrl)
+                        : parseTortugaVod(tortugaUrl)
+                    ).then(result => {
+                        if (row.tortuga_path.startsWith('embed/') && result && result.length) {
+                            routes.tortuga = result.map(season => ({
                                 ...season,
                                 folder: (season.folder || []).map(ep => ({
                                     ...ep,
@@ -198,21 +202,18 @@ module.exports = {
                                     })),
                                 })),
                             }));
-                        }
-                    } else {
-                        const vodData = await parseTortugaVod(tortugaUrl, signal);
-                        if (vodData && vodData.file) {
+                        } else if (!row.tortuga_path.startsWith('embed/') && result && result.file) {
                             routes.tortuga = [{
                                 title: row.title || 'Tortuga',
-                                file: vodData.file,
-                                poster: vodData.poster || null,
+                                file: result.file,
+                                poster: result.poster || null,
                             }];
                         }
-                    }
-                } catch (e) {
-                    console.error('[KinoUkrDB] Tortuga error:', e.message);
-                }
+                    }).catch(e => console.error('[KinoUkrDB] Tortuga error:', e.message))
+                );
             }
+
+            await Promise.allSettled(fetches);
 
             if (!Object.keys(routes).length) return null;
             return { _routes: routes };
