@@ -562,8 +562,15 @@ async function getLinks(metadata, host, activeProviderGroups, onResult) {
 
     if (tasks.length === 0) return null;
 
-    // ── Wait for all tasks — each handles its own timeout independently ──────
-    await Promise.allSettled(tasks.map(t => t.promise));
+    // ── Wait for all tasks, with a safety-net timeout ────────────────────────
+    // The timeout does NOT abort tasks — it just lets getLinks return early
+    // so hanging providers don't block the response. Results from already-
+    // completed providers are already streamed via onResult and keep working.
+    await Promise.race([
+        Promise.allSettled(tasks.map(t => t.promise)),
+        new Promise(r => setTimeout(r, 30_000)),
+    ]);
+
     return Object.keys(results).length ? results : null;
 }
 
