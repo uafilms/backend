@@ -221,6 +221,10 @@ async function getVods(pageUrl, passphrase, axiosConfig, signal) {
         try {
             const decrypted = aesDecrypt(passphrase, tag);
             const data = JSON.parse(decrypted.replace(/\\/g, ''));
+            // Tortuga changed URL format from /vod/ to /usp/
+            for (const p of data) {
+                if (p.url) p.url = p.url.replace('/usp/', '/vod/');
+            }
             players.push(...data);
         } catch (e) {
             // skip invalid/unreadable tags
