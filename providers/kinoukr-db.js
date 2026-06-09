@@ -213,7 +213,11 @@ module.exports = {
                 );
             }
 
-            await Promise.allSettled(fetches);
+            // Don't wait more than 3s — Tortuga finishes in <1s, Ashdi takes 15s
+            await Promise.race([
+                Promise.allSettled(fetches),
+                new Promise(r => setTimeout(r, 3000)),
+            ]);
 
             if (!Object.keys(routes).length) return null;
             return { _routes: routes };
