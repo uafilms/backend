@@ -499,17 +499,11 @@ const PROVIDER_CDN = {
 
 async function getLinks(metadata, host, activeProviderGroups, onResult) {
     const results = {};
-    const mainCtrl = new AbortController();
-    const TIMEOUT = 20_000;
     const tasks = [];
 
     // ── Helper: create a per-provider task with its own AbortController ──────
     function addTask(name, cdns, fn) {
         const ctrl = new AbortController();
-        // When main aborts (timeout/all-complete), also abort this task
-        mainCtrl.signal.addEventListener('abort', () => {
-            if (!ctrl.signal.aborted) ctrl.abort();
-        }, { once: true });
 
         const promise = (async () => {
             try {
@@ -568,13 +562,8 @@ async function getLinks(metadata, host, activeProviderGroups, onResult) {
 
     if (tasks.length === 0) return null;
 
-    // ── Wait for all tasks or timeout ───────────────────────────────────────
-    await Promise.race([
-        Promise.all(tasks.map(t => t.promise.catch(() => {}))),
-        new Promise(r => setTimeout(r, TIMEOUT)),
-    ]);
-
-    mainCtrl.abort(); // mop up any remaining in-flight HTTP requests
+    // ── Wait for all tasks — each handles its own timeout independently ──────
+    await Promise.allSettled(tasks.map(t => t.promise));
     return Object.keys(results).length ? results : null;
 }
 
