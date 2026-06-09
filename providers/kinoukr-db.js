@@ -213,11 +213,12 @@ module.exports = {
                 );
             }
 
-            // Don't wait more than 3s — Tortuga finishes in <1s, Ashdi takes 15s
-            await Promise.race([
-                Promise.allSettled(fetches),
-                new Promise(r => setTimeout(r, 3000)),
-            ]);
+            // Return as soon as ANY fetch completes (Tortuga ~0.7s),
+            // instead of waiting for all or a fixed timeout.
+            // Ashdi continues in the background on its own 15s timeout.
+            if (fetches.length) {
+                await Promise.race(fetches.map(p => p.then(() => {}, () => {})));
+            }
 
             if (!Object.keys(routes).length) return null;
             return { _routes: routes };
