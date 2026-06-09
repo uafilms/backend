@@ -99,37 +99,77 @@ function norm(s) {
     return (s || '').replace(/ґ/g, 'г').replace(/ї/g, 'ї').replace(/є/g, 'е');
 }
 
-function search(title, engName) {
+function search(title, engName, year) {
     if (!db) return null;
     const nT = norm((title || '').trim().toLowerCase());
     const nE = norm((engName || '').trim().toLowerCase());
     if (!nT && !nE) return null;
 
-    // Exact match by search_title or search_eng (pre-lowercased for Unicode support)
-    let row = db.prepare('SELECT * FROM content WHERE search_title = ? OR search_eng = ?').get(nT, nT);
+    let row;
+
+    if (year) {
+        row = db.prepare('SELECT * FROM content WHERE (search_title = ? OR search_eng = ?) AND year = ?').get(nT, nT, year);
+        if (row) return row;
+        if (nE && nE !== nT) {
+            row = db.prepare('SELECT * FROM content WHERE search_eng = ? AND year = ?').get(nE, year);
+            if (row) return row;
+        }
+    }
+
+    row = db.prepare('SELECT * FROM content WHERE search_title = ? OR search_eng = ?').get(nT, nT);
     if (row) return row;
 
-    // Exact match by search_eng (if different from title)
     if (nE && nE !== nT) {
         row = db.prepare('SELECT * FROM content WHERE search_eng = ?').get(nE);
         if (row) return row;
     }
 
-    // LIKE match using pre-lowercased columns
-    row = db.prepare('SELECT * FROM content WHERE search_title LIKE ? OR search_eng LIKE ?').get(`%${nT}%`, `%${nT}%`);
-    if (row) return row;
+    const tryFuzzy = () => {
+        if (year) {
+            row = db.prepare('SELECT * FROM content WHERE (search_title LIKE ? OR search_eng LIKE ?) AND year = ?').get(`%${nT}%`, `%${nT}%`, year);
+            if (row) return row;
+            if (nE) {
+                row = db.prepare('SELECT * FROM content WHERE search_eng LIKE ? AND year = ?').get(`%${nE}%`, year);
+                if (row) return row;
+            }
+        }
 
-    if (nE) {
-        row = db.prepare('SELECT * FROM content WHERE search_eng LIKE ?').get(`%${nE}%`);
-        if (row) return row;
-    }
+        row = db.prepare('SELECT * FROM content WHERE search_title LIKE ? OR search_eng LIKE ?').get(`%${nT}%`, `%${nT}%`);
+        if (row) {
+            if (year && row.year && row.year != year) return null;
+            return row;
+        }
+
+        if (nE) {
+            row = db.prepare('SELECT * FROM content WHERE search_eng LIKE ?').get(`%${nE}%`);
+            if (row) {
+                if (year && row.year && row.year != year) return null;
+                return row;
+            }
+        }
+
+        return null;
+    };
+
+    row = tryFuzzy();
+    if (row) return row;
 
     // Word-by-word
     const words = [...new Set(nT.split(/\s+/).filter(w => w.length > 2))];
     if (words.length) {
         const where = words.map(() => '(search_title LIKE ? OR search_eng LIKE ?)').join(' OR ');
-        row = db.prepare(`SELECT * FROM content WHERE ${where}`).get(...words.flatMap(w => [`%${w}%`, `%${w}%`]));
-        if (row) return row;
+        const params = words.flatMap(w => [`%${w}%`, `%${w}%`]);
+
+        if (year) {
+            row = db.prepare(`SELECT * FROM content WHERE (${where}) AND year = ?`).get(...params, year);
+            if (row) return row;
+        }
+
+        row = db.prepare(`SELECT * FROM content WHERE ${where}`).get(...params);
+        if (row) {
+            if (year && row.year && row.year != year) return null;
+            return row;
+        }
     }
 
     return null;
@@ -154,7 +194,7 @@ module.exports = {
             }
 
             if (!row) {
-                row = search(title, originalTitle);
+                row = search(title, originalTitle, year);
             }
 
             if (!row) {
