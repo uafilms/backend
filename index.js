@@ -1224,7 +1224,7 @@ app.get('/proxy/m3u8', checkTurnstile, async (req, res) => {
         }
 
         const isMoonAnime = url.includes('moonanime.art') || url.includes('mooncdn.space') || url.includes('s.moonanime');
-        const isAshdi = url.includes('ashdi.vip') || url.includes('ashdi.aartzz.pp.ua');
+        const isAshdi = url.includes('ashdi.vip');
         const isUafilmMe = url.includes('uafilm.me');
         const headers = isMoonAnime ? {
             'User-Agent': MOON_VOD_HEADERS['user-agent'],

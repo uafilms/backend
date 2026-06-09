@@ -3,8 +3,6 @@ const cheerio = require('cheerio');
 const proxyManager = require('../utils/proxyManager');
 
 // ─── Constants ────────────────────────────────────────────────────────────────
-const MY_PROXY = 'ashdi.aartzz.pp.ua';
-
 const BASE_HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
 };
@@ -50,25 +48,8 @@ function isMediaUrl(url) {
     );
 }
 
-function rewriteAshdiNavigationUrl(url) {
-    const out = normalizeUrl(url);
-    if (!out) return out;
-    return out
-        .replace(/https?:\/\/ashdi\.vip/gi, `https://${MY_PROXY}`)
-        .replace(/https?:\/\/ashdi\.[a-z0-9.-]+/gi, `https://${MY_PROXY}`);
-}
-
-function rewriteAshdiMediaUrl(url) {
-    const out = normalizeUrl(url);
-    if (!out) return out;
-    if (/https?:\/\/ashdi\.vip\/(vod|serial)\//i.test(out)) {
-        return out.replace(/https?:\/\/ashdi\.vip/gi, `https://${MY_PROXY}`);
-    }
-    return out;
-}
-
 function rewriteUrl(url, { media = false } = {}) {
-    return media ? rewriteAshdiMediaUrl(url) : rewriteAshdiNavigationUrl(url);
+    return normalizeUrl(url);
 }
 
 function cleanTitle(s) {
@@ -280,5 +261,4 @@ module.exports = {
     raceFirst,
     BASE_HEADERS,
     NAV_HEADERS,
-    MY_PROXY,
 };
